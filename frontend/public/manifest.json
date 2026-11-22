@@ -1,0 +1,10 @@
+{
+  "name": "MIRA — Media Intelligence & Research Assistant",
+  "short_name": "MIRA",
+  "description": "Go Beyond the Headline.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [{ "src": "/mira-logo.png", "sizes": "960x960", "type": "image/png", "purpose": "any" }]
+}
