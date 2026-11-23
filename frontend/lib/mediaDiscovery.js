@@ -100,6 +100,12 @@ export function getMediaSearchScore(item, query, kind) {
       [4, item.categories || getLiveCategories(item)],
       [3, item.description],
       [4, item.stream_description],
+      [5, item.language],
+      [5, item.network],
+      [4, item.region],
+      [4, item.province],
+      [4, item.city],
+      [4, item.station_type],
     ]
     : [
       [8, item.title],
@@ -109,6 +115,11 @@ export function getMediaSearchScore(item, query, kind) {
       [4, item.categories || getPodcastCategories(item)],
       [3, item.description],
       [5, item.transcript || item.transcriptText],
+      [5, item.language || item.media?.language],
+      [4, item.region || item.media?.region],
+      [4, item.province || item.media?.province],
+      [4, item.city || item.media?.city],
+      [5, item.network || item.media?.network],
     ];
   const fieldTokens = fields.map(([weight, value]) => [weight, new Set(tokens(value))]);
   let matches = 0;

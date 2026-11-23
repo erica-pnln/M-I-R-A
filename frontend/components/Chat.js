@@ -383,21 +383,13 @@ export default function Chat({
             )}
           </div>
         ))}
-        {busy && (
+        {busy && msgs[msgs.length - 1]?.role !== "assistant" && (
           <div
             role="status"
             aria-live="polite"
-            className="flex items-center gap-2 self-start rounded-2xl border border-white/15 bg-white/[.06] px-4 py-2.5 text-sm text-white/70"
+            className="self-start max-w-[90%] animate-pulse rounded-2xl border border-white/15 bg-white/[.06] px-4 py-2.5 text-sm text-white/75"
           >
-            <span
-              aria-hidden="true"
-              className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-white/25 border-t-mira-blue-light"
-            />
-            <span>
-              {msgs[msgs.length - 1]?.role === "assistant"
-                ? t("MIRA is responding…")
-                : t("MIRA is processing your request…")}
-            </span>
+            {t("MIRA's analyzing")}
           </div>
         )}
       </div>

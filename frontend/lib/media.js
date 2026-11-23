@@ -45,3 +45,29 @@ export function getDirectLivePageUrl(value) {
     return "";
   }
 }
+
+const OFFICIAL_RADIO_SOURCE_HOSTS = new Set([
+  "mbc.com.ph",
+  "www.dzrh.com.ph",
+  "dzrh.com.ph",
+  "bomboradyo.com",
+  "www.bomboradyo.com",
+  "rmn.ph",
+  "brigada.ph",
+]);
+
+export function getOfficialRadioSourceUrl(value) {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:"
+      || url.username
+      || url.password
+      || !OFFICIAL_RADIO_SOURCE_HOSTS.has(url.hostname.toLowerCase())
+    ) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}

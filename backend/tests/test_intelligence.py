@@ -3,11 +3,11 @@ import json
 import re
 import unittest
 from io import BytesIO
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from threading import Event
 from time import monotonic, sleep
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import httpx
@@ -16,7 +16,7 @@ from fastapi import UploadFile
 from postgrest.exceptions import APIError
 from starlette.datastructures import Headers
 
-from app import ai, config, feeds, intelligence, main, news
+from app import ai, config, feeds, intelligence, main, news, search_intelligence
 
 
 def articles_for_topics():
@@ -41,6 +41,311 @@ class IntelligenceTests(unittest.TestCase):
         ai.providers.reset_health()
         with ai._response_cache_lock:
             ai._response_cache.clear()
+
+    def test_search_intelligence_extracts_context_and_historical_year_ranges(self):
+        intent = search_intelligence.understand_query(
+            "Show me the news about Rodrigo Roa Duterte during his war on drugs."
+        )
+        self.assertEqual(intent["query"], "Rodrigo Roa Duterte war drugs")
+        dated = search_intelligence.understand_query(
+            "Show me news about Alexandra Eala from 2023 to 2024"
+        )
+        self.assertEqual(dated["query"], "Alexandra Eala")
+        self.assertEqual(dated["from_date"], date(2023, 1, 1))
+        self.assertEqual(dated["to_date"], date(2024, 12, 31))
+        series_title = search_intelligence.understand_query("agri-ignite year 2")
+        self.assertEqual(series_title["query"], "agri-ignite year 2")
+        self.assertIsNone(series_title["from_date"])
+        self.assertIsNone(series_title["to_date"])
+
+    def test_search_matches_mindanao_sentinel_story_metadata(self):
+        story = {
+            "id": "agri-ignite-year-2",
+            "title": "Agri-IGNITE Year 2 showcases digital innovations for farming and fisheries in Caraga",
+            "description": "Fisheries agencies in Butuan pilot solar-powered cold storage.",
+            "source": "The Mindanao Sentinel",
+            "category": "Agriculture",
+            "topics": ["Agriculture"],
+            "people": ["Maria Santos"],
+            "location": "Butuan City",
+        }
+        unrelated = {
+            "id": "sports",
+            "title": "Basketball league opens championship season",
+            "summary": "Teams prepare for the final match.",
+            "source": "Sports Daily",
+        }
+
+        for query in (
+            "agri-ignite",
+            "solar-powered cold storage",
+            "Maria Santos",
+            "Butuan City",
+            "Agriculture",
+            "The Mindanao Sentinel",
+        ):
+            with self.subTest(query=query):
+                ranked, _ = intelligence.fast_search(query, [story, unrelated], limit=1)
+                self.assertEqual([article["id"] for article in ranked], ["agri-ignite-year-2"])
+
+    def test_exact_archive_matches_skip_live_search_and_return_immediately(self):
+        story = {
+            "id": "agri-ignite-year-2",
+            "title": "Agri-IGNITE Year 2 showcases digital innovations for farming and fisheries in Caraga",
+            "summary": "Agri-IGNITE Year 2 showcases digital innovations for farming and fisheries in Caraga The Mindanao Sentinel",
+            "source": "The Mindanao Sentinel",
+            "section": "regional",
+            "url": "https://example.test/agri-ignite",
+            "category": "Agriculture",
+            "topics": ["Agriculture"],
+            "published": "2026-11-20T13:00:00Z",
+        }
+        unrelated = {
+            "id": "sports",
+            "title": "Basketball league opens championship season",
+            "summary": "Teams prepare for the final match.",
+            "source": "Sports Daily",
+            "section": "national",
+            "url": "https://example.test/sports",
+        }
+        with (
+            patch.dict(news._cache, {"items": [story, unrelated], "stored_loaded": True}),
+            patch.dict(news._by_id, {}, clear=True),
+            patch.dict(news._search_cache, {}, clear=True),
+            patch.object(news, "sb", None),
+            patch.object(news, "_schedule_image_enrichment"),
+            patch.object(news, "_pull_feeds", new=AsyncMock()) as pull_feeds,
+            patch.object(
+                news,
+                "hybrid_search",
+                side_effect=lambda query, articles, limit, **_kwargs: (
+                    intelligence.fast_search(query, articles, limit)[0],
+                    "bm25+sentence-transformers",
+                ),
+            ),
+        ):
+            result = news.search_discovery("agri-ignite", limit=10)
+
+        self.assertEqual([article["id"] for article in result["articles"]], ["agri-ignite-year-2"])
+        pull_feeds.assert_not_awaited()
+
+    def test_default_cors_origins_include_nextjs_fallback_port(self):
+        self.assertIn("http://localhost:3001", config._cors_origins(None))
+        self.assertIn("http://127.0.0.1:3001", config._cors_origins(None))
+        configured = config._cors_origins(
+            "http://localhost:3000,http://127.0.0.1:3000"
+        )
+        self.assertIn("http://localhost:3001", configured)
+        self.assertIn("http://127.0.0.1:3001", configured)
+
+    def test_search_discovery_fetches_query_results_and_archives_source_metadata(self):
+        article = {
+            "id": "eala-story",
+            "title": "Alexandra Eala advances in 2024 tennis tournament",
+            "summary": "The Filipino tennis player advanced to the next round.",
+            "source": "Rappler",
+            "section": "national",
+            "url": "https://news.google.com/rss/articles/eala-story",
+            "canonical_url": "https://news.google.com/rss/articles/eala-story",
+            "category": "Sports",
+            "image_url": None,
+            "published": "2024-06-10T00:00:00Z",
+            "author": "News Desk",
+        }
+        supabase = MagicMock()
+        with (
+            patch.dict(news._cache, {"items": [], "stored_loaded": True}),
+            patch.dict(news._by_id, {}, clear=True),
+            patch.dict(news._search_cache, {}, clear=True),
+            patch.object(news, "sb", supabase),
+            patch.object(news, "_load_existing_articles", return_value={}),
+            patch.object(news, "_schedule_image_enrichment") as schedule_images,
+            patch.object(
+                news,
+                "hybrid_search",
+                side_effect=lambda _query, articles, limit, **_kwargs: (
+                    articles[:limit], "bm25+sentence-transformers",
+                ),
+            ),
+            patch.object(
+                news,
+                "_pull_feeds",
+                new=AsyncMock(return_value=[([article], None)]),
+            ) as pull_feeds,
+        ):
+            result = news.search_discovery(
+                "Show me news about Alexandra Eala in 2024",
+                limit=10,
+            )
+
+        self.assertEqual([item["id"] for item in result["articles"]], ["eala-story"])
+        self.assertEqual(result["articles"][0]["author"], "News Desk")
+        schedule_images.assert_called_once()
+        self.assertEqual(
+            [article["id"] for article in schedule_images.call_args.args[0]],
+            ["eala-story"],
+        )
+        self.assertIn("image_enrichment_running", result)
+        supabase.table.return_value.upsert.assert_called_once()
+        archived = supabase.table.return_value.upsert.call_args.args[0]
+        self.assertEqual(archived[0]["source"], "Rappler")
+        self.assertEqual(archived[0]["author"], "News Desk")
+        feed_url = pull_feeds.await_args.args[0][0]["url"]
+        self.assertIn("after%3A2024-01-01", feed_url)
+        self.assertIn("before%3A2025-01-01", feed_url)
+        self.assertEqual(pull_feeds.await_args.args[0][0]["timeout_seconds"], 5)
+        self.assertEqual(pull_feeds.await_args.args[0][0]["retries"], 0)
+
+    def test_search_discovery_falls_back_to_archive_when_live_rss_has_no_results(self):
+        archived = {
+            "id": "archived-duterte",
+            "title": "Duterte war on drugs investigation",
+            "summary": "A historical report on the investigation.",
+            "source": "Rappler",
+            "section": "national",
+            "url": "https://rappler.com/news/archives/duterte-investigation",
+            "published": "2019-03-01T00:00:00Z",
+        }
+        with (
+            patch.dict(news._cache, {"items": [archived], "stored_loaded": True}),
+            patch.dict(news._by_id, {}, clear=True),
+            patch.dict(news._search_cache, {}, clear=True),
+            patch.object(news, "sb", None),
+            patch.object(news, "_schedule_image_enrichment"),
+            patch.object(
+                news,
+                "hybrid_search",
+                side_effect=lambda _query, articles, limit, **_kwargs: (
+                    articles[:limit], "bm25+sentence-transformers",
+                ),
+            ),
+            patch.object(
+                news,
+                "_pull_feeds",
+                new=AsyncMock(return_value=[([], "Feed returned no entries")]),
+            ),
+        ):
+            result = news.search_discovery("Duterte war on drugs", period="historical")
+
+        self.assertEqual([item["id"] for item in result["articles"]], ["archived-duterte"])
+        self.assertEqual(
+            result["source_errors"],
+            [{"source": "Google News Search", "error": "Feed returned no entries"}],
+        )
+
+    def test_search_discovery_filters_and_paginates_historical_archive_results(self):
+        archived = [
+            {
+                "id": "local-eala",
+                "title": "Alexandra Eala local tennis update",
+                "summary": "Career report.",
+                "source": "PNA",
+                "section": "local",
+                "url": "https://example.test/local",
+                "published": "2024-01-01T00:00:00Z",
+                "topics": ["Sports"],
+            },
+            {
+                "id": "national-eala",
+                "title": "Alexandra Eala national tennis update",
+                "summary": "Career report.",
+                "source": "Rappler",
+                "section": "national",
+                "url": "https://example.test/national",
+                "published": "2020-01-01T00:00:00Z",
+                "topics": ["Sports"],
+            },
+            {
+                "id": "international-eala",
+                "title": "Alexandra Eala international tennis update",
+                "summary": "Career report.",
+                "source": "BBC",
+                "section": "international",
+                "url": "https://example.test/international",
+                "published": "2023-01-01T00:00:00Z",
+                "topics": ["Sports"],
+            },
+        ]
+        with (
+            patch.dict(news._cache, {"items": archived, "stored_loaded": True}),
+            patch.dict(news._by_id, {}, clear=True),
+            patch.dict(news._search_cache, {}, clear=True),
+            patch.object(news, "sb", None),
+            patch.object(news, "_schedule_image_enrichment"),
+            patch.object(
+                news,
+                "hybrid_search",
+                side_effect=lambda _query, articles, limit, **_kwargs: (
+                    articles[:limit], "bm25+sentence-transformers",
+                ),
+            ),
+            patch.object(
+                news,
+                "_pull_feeds",
+                new=AsyncMock(return_value=[([], "Feed returned no entries")]),
+            ),
+        ):
+            first = news.search_discovery(
+                "Alexandra Eala",
+                scope="philippines",
+                topic="Sports",
+                from_date=date(2020, 1, 1),
+                to_date=date(2024, 12, 31),
+                sort="oldest",
+                limit=1,
+            )
+            second = news.search_discovery(
+                "Alexandra Eala",
+                scope="philippines",
+                topic="Sports",
+                from_date=date(2020, 1, 1),
+                to_date=date(2024, 12, 31),
+                sort="oldest",
+                limit=1,
+                offset=1,
+            )
+
+        self.assertEqual(first["total"], 2)
+        self.assertEqual([item["id"] for item in first["articles"]], ["national-eala"])
+        self.assertEqual(first["next_offset"], 1)
+        self.assertEqual([item["id"] for item in second["articles"]], ["local-eala"])
+        self.assertIsNone(second["next_offset"])
+
+    def test_search_api_forwards_filters_and_rejects_reversed_date_ranges(self):
+        with patch.object(main.news, "search_discovery", return_value={"articles": []}) as search:
+            result = main.search_articles(
+                q="Philippine elections",
+                section=None,
+                topic="Politics",
+                scope="philippines",
+                period="historical",
+                from_date=date(2016, 1, 1),
+                to_date=date(2016, 12, 31),
+                sort="oldest",
+                limit=20,
+                offset=10,
+                uid=None,
+            )
+        self.assertEqual(result, {"articles": []})
+        self.assertEqual(search.call_args.kwargs["scope"], "philippines")
+        self.assertEqual(search.call_args.kwargs["from_date"], date(2016, 1, 1))
+        self.assertEqual(search.call_args.kwargs["sort"], "oldest")
+
+        with self.assertRaises(main.HTTPException) as raised:
+            main.search_articles(
+                q="Philippine elections",
+                section=None,
+                topic=None,
+                scope="all",
+                period="all",
+                from_date=date(2020, 1, 1),
+                to_date=date(2019, 1, 1),
+                sort="relevance",
+                limit=20,
+                offset=0,
+                uid=None,
+            )
+        self.assertEqual(raised.exception.status_code, 422)
 
     def test_feed_text_decodes_html_entities_for_readable_story_summaries(self):
         self.assertEqual(news._clean("News&nbsp;&nbsp; &amp; reporting"), "News & reporting")
@@ -383,10 +688,32 @@ class IntelligenceTests(unittest.TestCase):
         )
         self.assertIn("/rss/articles/article-token?", get.call_args.args[0])
 
-    def test_google_news_story_image_is_fetched_from_publisher_article(self):
+    def test_google_news_story_uses_public_thumbnail_before_publisher_fallback(self):
+        google_url = "https://news.google.com/rss/articles/article-token?oc=5"
+        response = SimpleNamespace(
+            headers={"content-type": "text/html"},
+            url=google_url,
+            text='<meta property="og:image" content="https://lh3.googleusercontent.com/story-photo">',
+            raise_for_status=lambda: None,
+        )
+        with patch.object(news, "_decode_google_news_urls") as decode, patch.object(
+            news.httpx, "get", return_value=response
+        ) as get:
+            image = news._page_image({"url": google_url})
+        self.assertEqual(image, "https://lh3.googleusercontent.com/story-photo")
+        self.assertEqual(get.call_args.args[0], google_url)
+        decode.assert_not_called()
+
+    def test_google_news_story_falls_back_to_publisher_page_for_image(self):
         google_url = "https://news.google.com/rss/articles/article-token?oc=5"
         publisher_url = "https://publisher.example.test/story"
-        response = SimpleNamespace(
+        google_response = SimpleNamespace(
+            headers={"content-type": "text/html"},
+            url=google_url,
+            text="<html></html>",
+            raise_for_status=lambda: None,
+        )
+        publisher_response = SimpleNamespace(
             headers={"content-type": "text/html"},
             url=publisher_url,
             text='<meta property="og:image" content="/images/real-photo.jpg">',
@@ -394,7 +721,9 @@ class IntelligenceTests(unittest.TestCase):
         )
         with patch.object(
             news, "_decode_google_news_urls", return_value={google_url: publisher_url}
-        ), patch.object(news.httpx, "get", return_value=response) as get:
+        ), patch.object(
+            news.httpx, "get", side_effect=[google_response, publisher_response]
+        ) as get:
             image = news._page_image({"url": google_url})
         self.assertEqual(image, "https://publisher.example.test/images/real-photo.jpg")
         self.assertEqual(get.call_args.args[0], publisher_url)
@@ -403,16 +732,19 @@ class IntelligenceTests(unittest.TestCase):
         google_url = "https://news.google.com/rss/articles/article-token?oc=5"
         publisher_url = "https://publisher.example.test/story"
         blocked_response = httpx.Response(
-            403, request=httpx.Request("GET", publisher_url)
+            403, request=httpx.Request("GET", google_url)
         )
         with patch.object(
             news, "_decode_google_news_urls", return_value={google_url: publisher_url}
         ), patch.object(
-            news.httpx, "get", return_value=blocked_response
+            news.httpx, "get", side_effect=[
+                blocked_response,
+                httpx.Response(403, request=httpx.Request("GET", publisher_url)),
+            ]
         ) as get:
             image = news._page_image({"url": google_url})
         self.assertIsNone(image)
-        get.assert_called_once()
+        self.assertEqual(get.call_count, 2)
 
     def test_abs_cbn_image_host_is_allowed_by_image_proxy(self):
         image_url = (
@@ -631,8 +963,13 @@ class IntelligenceTests(unittest.TestCase):
     def test_background_image_enrichment_does_not_wait_for_publishers(self):
         entered = Event()
         release = Event()
-        with patch.object(
-            news, "_enrich_missing_images",
+        with patch.dict(news._cache, {"items": [{
+            "id": "background-image",
+            "url": "https://example.test/story",
+            "image": None,
+        }]}), patch.object(
+            news,
+            "_enrich_missing_images",
             side_effect=lambda items: (entered.set(), release.wait(2)),
         ):
             try:
@@ -647,6 +984,20 @@ class IntelligenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 news.fetch_article_image("https://untrusted.example.test/photo.jpg")
         get.assert_not_called()
+
+    def test_google_news_image_cdn_is_allowed_by_the_image_proxy(self):
+        response = SimpleNamespace(
+            is_redirect=False,
+            headers={"content-type": "image/webp"},
+            content=b"photo",
+            raise_for_status=lambda: None,
+        )
+        with patch.object(news.httpx, "get", return_value=response):
+            content, media_type = news.fetch_article_image(
+                "https://lh3.googleusercontent.com/photo"
+            )
+        self.assertEqual(content, b"photo")
+        self.assertEqual(media_type, "image/webp")
 
     def test_pna_photo_proxy_uses_the_working_publisher_image_host(self):
         response = SimpleNamespace(
@@ -732,6 +1083,20 @@ class IntelligenceTests(unittest.TestCase):
             else:
                 news._image_attempts[article["url"]] = original_attempt
 
+    def test_missing_article_with_empty_supabase_response_returns_not_found(self):
+        supabase = MagicMock()
+        query = supabase.table.return_value.select.return_value.eq.return_value
+        query.maybe_single.return_value.execute.return_value = None
+
+        with (
+            patch.object(news, "sb", supabase),
+            patch.object(news, "start_refresh_background") as refresh,
+        ):
+            result = news.get_article("missing-article-empty-response")
+
+        self.assertIsNone(result)
+        refresh.assert_called_once()
+
     def test_preprocessing_lemmatizes_and_filters_stop_words(self):
         class Token:
             def __init__(self, lemma, is_alpha=True, is_stop=False):
@@ -791,6 +1156,109 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(mode, "bm25+sentence-transformers")
         self.assertEqual(ranked[0]["id"], "climate")
 
+    def test_hybrid_search_finds_paraphrases_without_keyword_overlap(self):
+        docs = [
+            {"id": "harvest", "title": "El Niño cuts harvest as water shortages threaten growers"},
+            {"id": "sports", "title": "Football league opens championship season"},
+        ]
+        with (
+            patch.object(intelligence, "sb", None),
+            patch.object(intelligence, "_encode_query", return_value=np.array([1.0, 0.0])),
+            patch.object(
+                intelligence,
+                "_encode_articles",
+                return_value=(np.array([[1.0, 0.0], [0.0, 1.0]]), []),
+            ),
+        ):
+            ranked, _ = intelligence.hybrid_search("Why are food prices rising?", docs, limit=1)
+
+        self.assertEqual([article["id"] for article in ranked], ["harvest"])
+
+    def test_hybrid_search_can_skip_remote_vector_store(self):
+        docs = [{"id": "climate", "title": "Climate research", "summary": "Warming ocean study"}]
+        supabase = MagicMock()
+        with (
+            patch.object(intelligence, "sb", supabase),
+            patch.object(intelligence, "_encode_query", return_value=np.array([1.0, 0.0])),
+            patch.object(
+                intelligence,
+                "_encode_articles",
+                return_value=(np.array([[1.0, 0.0]]), []),
+            ),
+        ):
+            ranked, mode = intelligence.hybrid_search(
+                "climate change", docs, limit=1, use_vector_store=False,
+            )
+
+        self.assertEqual([article["id"] for article in ranked], ["climate"])
+        self.assertEqual(mode, "bm25+sentence-transformers")
+        supabase.table.assert_not_called()
+        supabase.rpc.assert_not_called()
+
+    def test_article_search_text_includes_content_topics_events_issues_and_people(self):
+        article = {
+            "title": "Public inquiry opens",
+            "description": "A national report examines the inquiry.",
+            "content": [{"value": "Officials discuss the water contamination incident."}],
+            "topics": ["Public health"],
+            "events": ["Water contamination"],
+            "issues": ["Drinking water safety"],
+            "author": "Mira Santos",
+            "category": "Investigations",
+        }
+
+        text = intelligence._article_text(article)
+
+        for value in (
+            "Public inquiry opens", "national report", "water contamination incident",
+            "Public health", "Water contamination", "Drinking water safety",
+            "Mira Santos", "Investigations",
+        ):
+            with self.subTest(value=value):
+                self.assertIn(value, text)
+
+    def test_search_discovery_uses_hybrid_search_and_indexes_article_metadata(self):
+        archived = {
+            "id": "water-safety",
+            "title": "Inquiry opens after community illness reports",
+            "summary": "Officials investigate a water contamination event.",
+            "source": "Rappler",
+            "section": "national",
+            "url": "https://example.test/water-safety",
+            "published": "2024-01-01T00:00:00Z",
+            "author": "Mira Santos",
+            "category": "Public health",
+            "topics": ["Public health"],
+            "content": "Residents say the drinking water made them sick.",
+        }
+        with (
+            patch.dict(news._cache, {"items": [archived], "stored_loaded": True}),
+            patch.dict(news._by_id, {}, clear=True),
+            patch.dict(news._search_cache, {}, clear=True),
+            patch.object(news, "sb", None),
+            patch.object(news, "_schedule_image_enrichment"),
+            patch.object(
+                news,
+                "_pull_feeds",
+                new=AsyncMock(return_value=[([], "Feed returned no entries")]),
+            ),
+            patch.object(news, "fast_search", return_value=([], None)),
+            patch.object(
+                news,
+                "hybrid_search",
+                return_value=([archived], "bm25+sentence-transformers"),
+            ) as semantic_search,
+            patch.object(news, "media_search_text", return_value="Rappler news source"),
+        ):
+            result = news.search_discovery("Why did residents get sick?", period="historical")
+
+        self.assertEqual([article["id"] for article in result["articles"]], ["water-safety"])
+        self.assertEqual(result["mode"], "archive+live-rss+bm25+sentence-transformers")
+        indexed_article = semantic_search.call_args.args[1][0]
+        self.assertEqual(indexed_article["search_metadata"], "Rappler news source")
+        self.assertIn("drinking water made them sick", intelligence._article_text(indexed_article))
+        self.assertFalse(semantic_search.call_args.kwargs["use_vector_store"])
+
     def test_fast_search_corrects_misspelled_terms_without_loading_embeddings(self):
         docs = [
             {"id": "farm", "title": "Agriculture researchers study crop harvests"},
@@ -805,6 +1273,16 @@ class IntelligenceTests(unittest.TestCase):
         )
         self.assertEqual(no_match, [])
         self.assertIsNone(no_correction)
+
+    def test_fast_search_matches_hyphenated_search_to_separate_words(self):
+        docs = [
+            {"id": "agri-ignite", "title": "Agri Ignite Year 2 supports local farmers"},
+            {"id": "unrelated", "title": "Basketball league opens championship season"},
+        ]
+
+        ranked, _ = intelligence.fast_search("agri-ignite year 2", docs, limit=1)
+
+        self.assertEqual([article["id"] for article in ranked], ["agri-ignite"])
 
     def test_content_recommendations_rank_by_interest_similarity(self):
         docs = [
@@ -1196,39 +1674,45 @@ class IntelligenceTests(unittest.TestCase):
             None, None, "Sports", limit=21, offset=20, interests=[]
         )
 
-    def test_search_endpoint_returns_fuzzy_matches_without_refreshing_feeds(self):
-        docs = [{"id": "farm", "title": "Agriculture researchers report crop losses"}]
-        with (
-            patch.object(main.news, "count_articles", return_value=1),
-            patch.object(main.news, "list_articles", return_value=docs),
-            patch.object(
-                main.intelligence, "fast_search", return_value=(docs, "agriculture")
-            ),
-        ):
+    def test_search_endpoint_delegates_to_news_discovery(self):
+        response = {
+            "articles": [{"id": "farm", "title": "Agriculture researchers report crop losses"}],
+            "corrected_query": "agriculture",
+            "mode": "archive+live-rss+bm25",
+        }
+        with patch.object(main.news, "search_discovery", return_value=response) as search:
             result = main.search_articles("agricultre", limit=10, offset=0, uid=None)
         self.assertEqual(result["corrected_query"], "agriculture")
-        self.assertEqual(result["articles"], docs)
-        self.assertEqual(result["mode"], "bm25+typo-correction")
+        self.assertEqual(result["mode"], "archive+live-rss+bm25")
+        self.assertEqual(search.call_args.kwargs["scope"], "all")
+        self.assertEqual(search.call_args.kwargs["period"], "all")
+
+    def test_search_endpoint_returns_a_service_error_when_semantic_search_is_unavailable(self):
+        with patch.object(
+            main.news,
+            "search_discovery",
+            side_effect=intelligence.IntelligenceUnavailable("Search model unavailable."),
+        ):
+            with self.assertRaises(main.HTTPException) as raised:
+                main.search_articles(q="agri-ignite", limit=10, offset=0, uid=None)
+
+        self.assertEqual(raised.exception.status_code, 503)
 
     def test_search_endpoint_applies_geographic_and_topic_filters_and_pagination(self):
         docs = [
             {"id": "local-farm", "section": "local", "title": "Farmers grow rice"},
             {"id": "world-farm", "section": "international", "title": "Farmers grow rice"},
         ]
-        with (
-            patch.object(main.news, "count_articles", return_value=1),
-            patch.object(main.news, "list_articles", return_value=docs) as list_articles,
-            patch.object(main.intelligence, "fast_search", return_value=(docs, None)),
-        ):
+        response = {"articles": [docs[0]], "next_offset": None}
+        with patch.object(main.news, "search_discovery", return_value=response) as search:
             result = main.search_articles(
                 "farmers", section="local", topic="Agriculture",
                 limit=1, offset=0, uid=None,
             )
         self.assertEqual(result["articles"], [docs[0]])
-        self.assertEqual(result["next_offset"], 1)
-        list_articles.assert_called_once_with(
-            "local", None, "Agriculture", limit=1
-        )
+        self.assertIsNone(result["next_offset"])
+        self.assertEqual(search.call_args.kwargs["section"], "local")
+        self.assertEqual(search.call_args.kwargs["topic"], "Agriculture")
 
     def test_dashboard_prioritizes_local_trending_and_paginates_latest(self):
         docs = [
@@ -1284,13 +1768,10 @@ class IntelligenceTests(unittest.TestCase):
         )
 
     def test_news_feeds_provide_separate_caraga_and_mindanao_sections(self):
-        regional_feeds = {
-            feed["section"]: feed["source"]
-            for feed in feeds.FEEDS
-            if feed["section"] in {"local", "regional"}
-        }
-        self.assertEqual(regional_feeds["local"], "Google News (Caraga)")
-        self.assertEqual(regional_feeds["regional"], "Google News (Mindanao)")
+        caraga = next(feed for feed in feeds.FEEDS if feed["source"] == "Google News (Caraga)")
+        mindanao = next(feed for feed in feeds.FEEDS if feed["source"] == "Google News (Mindanao)")
+        self.assertEqual(caraga["section"], "local")
+        self.assertEqual(mindanao["section"], "regional")
 
     def test_dashboard_returns_all_feed_items_and_all_news_state_without_activity(self):
         docs = [
@@ -1431,6 +1912,10 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(sum(edge["relationship"] == "mentioned-in" for edge in graph["edges"]), 3)
 
     def test_rag_system_includes_citable_source_context(self):
+        self.assertIn(
+            "For general knowledge and journalism-method questions",
+            " ".join(ai.SYSTEM.split()),
+        )
         system = ai.retrieval_system([{
             "title": "News report", "source": "Example", "url": "https://example.test/story",
             "summary": "A verified source excerpt.",
@@ -1822,6 +2307,111 @@ class IntelligenceTests(unittest.TestCase):
         hybrid_search.assert_not_called()
         fast_search.assert_called_once_with("farming update", articles, 5)
 
+    def test_chat_retrieval_uses_context_for_short_followups(self):
+        query = main._chat_retrieval_query([
+            {"role": "user", "content": "What is the confidential funds investigation?"},
+            {"role": "assistant", "content": "It concerns public spending."},
+            {"role": "user", "content": "Why?"},
+        ])
+
+        self.assertIn("confidential", query)
+        self.assertIn("fund", query)
+
+    def test_chat_does_not_search_news_for_a_greeting(self):
+        with (
+            patch.object(main.news, "ensure_stored_cache_loaded"),
+            patch.object(main, "_retrieve") as retrieve,
+            patch.object(main.news, "search_discovery") as search,
+        ):
+            result = main._research_context(
+                [{"role": "user", "content": "Thanks!"}], "auto"
+            )
+
+        self.assertEqual(result["sources"], [])
+        retrieve.assert_not_called()
+        search.assert_not_called()
+
+    def test_chat_does_not_wait_for_archive_or_live_search_for_general_questions(self):
+        with (
+            patch.object(main.news, "ensure_stored_cache_loaded") as ensure_cache,
+            patch.object(main, "_retrieve", return_value=[]),
+            patch.object(main.news, "search_discovery") as search,
+        ):
+            result = main._research_context(
+                [{"role": "user", "content": "Why is the sky blue?"}], "auto"
+            )
+
+        self.assertEqual(result["sources"], [])
+        ensure_cache.assert_not_called()
+        search.assert_not_called()
+
+    def test_chat_research_searches_live_and_filters_untrusted_or_irrelevant_results(self):
+        live_articles = [
+            {
+                "id": "relevant",
+                "title": "Confidential funds inquiry seeks new records",
+                "summary": "Investigators requested documents about confidential funds.",
+                "source": "Rappler",
+                "url": "https://www.rappler.com/news/confidential-funds",
+            },
+            {
+                "id": "irrelevant",
+                "title": "Coastal towns prepare for heavy rain",
+                "summary": "Local officials issued a weather advisory.",
+                "source": "BBC",
+                "url": "https://www.bbc.com/news/weather",
+            },
+            {
+                "id": "untrusted",
+                "title": "Confidential funds inquiry seeks new records",
+                "summary": "Investigators requested documents about confidential funds.",
+                "source": "Unverified",
+                "url": "https://unverified.example/news/story",
+            },
+        ]
+        messages = [
+            {"role": "user", "content": "What is happening with the confidential funds inquiry?"},
+            {"role": "assistant", "content": "It concerns public spending."},
+            {"role": "user", "content": "Why is this still happening today?"},
+        ]
+
+        with (
+            patch.object(main.news, "ensure_stored_cache_loaded"),
+            patch.object(main, "_retrieve", return_value=[]),
+            patch.object(
+                main.news,
+                "search_discovery",
+                return_value={"articles": live_articles, "source_errors": []},
+            ) as search,
+            patch.object(main.news, "_decode_google_news_urls", return_value={}),
+        ):
+            result = main._research_context(messages, "auto")
+
+        self.assertEqual([source["id"] for source in result["sources"]], ["relevant"])
+        self.assertIn("confidential", search.call_args.args[0])
+        self.assertTrue(result["sources"])
+        self.assertFalse(result["live_search_failed"])
+
+    def test_trusted_live_search_resolves_google_news_links_before_allowlisting(self):
+        article = {
+            "id": "google-result",
+            "title": "Trusted report",
+            "url": "https://news.google.com/rss/articles/encoded",
+        }
+        with patch.object(
+            main.news,
+            "_decode_google_news_urls",
+            return_value={
+                article["url"]: "https://www.rappler.com/news/trusted-report"
+            },
+        ):
+            results = main._trusted_search_articles([article])
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0]["url"], "https://www.rappler.com/news/trusted-report"
+        )
+
     def test_chat_retrieval_excludes_unapproved_publishers(self):
         articles = [
             {"id": "trusted", "url": "https://news.bbc.co.uk/story"},
@@ -1926,6 +2516,81 @@ class IntelligenceTests(unittest.TestCase):
         self.assertEqual(image_part.inline_data.mime_type, "image/png")
         self.assertEqual(image_part.inline_data.data, b"image bytes")
 
+    def test_chat_tries_all_gemini_fallbacks_after_model_rejection(self):
+        rejected = ai.errors.APIError.__new__(ai.errors.APIError)
+        Exception.__init__(rejected, "model unavailable")
+        rejected.code = 400
+
+        class FakeModels:
+            calls = []
+
+            def generate_content(self, **kwargs):
+                self.calls.append(kwargs["model"])
+                if len(self.calls) < 3:
+                    raise rejected
+                return SimpleNamespace(text="Recovered response", usage_metadata=None)
+
+        models = FakeModels()
+        config = ai.types.GenerateContentConfig(system_instruction="Be accurate.")
+        with (
+            patch.object(ai.providers, "sb", None),
+            patch.object(
+                ai.providers, "models_for",
+                return_value=[SimpleNamespace(provider="huggingface")],
+            ),
+            patch.object(
+                ai.providers, "provider_rank",
+                side_effect=lambda provider: 1 if provider == "huggingface" else 0,
+            ),
+        ):
+            result = ai._generate_content(
+                SimpleNamespace(models=models),
+                model=ai.GEMINI_MODEL,
+                contents="Question",
+                config=config,
+            )
+
+        self.assertEqual(result.text, "Recovered response")
+        self.assertEqual(len(models.calls), 3)
+
+    def test_chat_stream_tries_all_gemini_fallbacks_after_model_rejection(self):
+        rejected = ai.errors.APIError.__new__(ai.errors.APIError)
+        Exception.__init__(rejected, "model unavailable")
+        rejected.code = 400
+
+        class FakeModels:
+            calls = []
+
+            def generate_content_stream(self, **kwargs):
+                self.calls.append(kwargs["model"])
+                if len(self.calls) < 3:
+                    raise rejected
+                return iter([SimpleNamespace(text="Recovered response")])
+
+        models = FakeModels()
+        config = ai.types.GenerateContentConfig(system_instruction="Be accurate.")
+        with (
+            patch.object(ai.providers, "sb", None),
+            patch.object(
+                ai.providers, "models_for",
+                return_value=[SimpleNamespace(provider="huggingface")],
+            ),
+            patch.object(
+                ai.providers, "provider_rank",
+                side_effect=lambda provider: 1 if provider == "huggingface" else 0,
+            ),
+        ):
+            result = list(ai._generate_content_stream(
+                SimpleNamespace(models=models),
+                model=ai.GEMINI_MODEL,
+                contents="Question",
+                config=config,
+                task="general_chat",
+            ))
+
+        self.assertEqual(result, ["Recovered response"])
+        self.assertEqual(len(models.calls), 3)
+
     def test_chat_stream_yields_gemini_chunks_as_they_arrive(self):
         class FakeModels:
             def generate_content_stream(self, **kwargs):
@@ -1940,7 +2605,7 @@ class IntelligenceTests(unittest.TestCase):
             chunks = list(ai.chat_stream([{"role": "user", "content": "Hello"}]))
 
         self.assertEqual(chunks, ["First", " chunk"])
-        self.assertEqual(models.config.max_output_tokens, 512)
+        self.assertEqual(models.config.max_output_tokens, ai._DEFAULT_CHAT_OUTPUT_TOKENS)
 
     def test_chat_stream_continues_if_gemini_hits_output_limit(self):
         class FakeModels:
@@ -2082,6 +2747,18 @@ class IntelligenceTests(unittest.TestCase):
         self.assertIn("Do not claim the image itself is authentic or fabricated", system)
         self.assertIn("at most 120 words", system)
 
+    def test_research_system_discloses_failed_live_search(self):
+        system = main._research_chat_system(
+            "auto", [], {"live_search_failed": True}
+        )
+
+        self.assertIn("The live news search failed", system)
+        self.assertIn("Do not describe stored records as current", system)
+        self.assertIn(
+            "Answer general-knowledge and journalism-method questions directly",
+            system,
+        )
+
     def test_explicit_article_request_uses_article_generation_task_and_prompt(self):
         body = main.ChatIn(
             messages=[main.Msg(
@@ -2092,6 +2769,11 @@ class IntelligenceTests(unittest.TestCase):
         with (
             patch.object(main, "_validate_chat_targets"),
             patch.object(main, "_retrieve", return_value=[]),
+            patch.object(
+                main.news,
+                "search_discovery",
+                return_value={"articles": [], "source_errors": []},
+            ),
             patch.object(ai, "_need_client"),
             patch.object(ai, "chat", return_value="# Draft headline") as chat,
             patch.object(ai, "append_source_references", side_effect=lambda reply, *_: reply),

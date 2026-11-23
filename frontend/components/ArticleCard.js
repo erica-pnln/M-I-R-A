@@ -15,6 +15,12 @@ export default function ArticleCard({ article, saved, onSave, compact = false, p
             <span className="truncate">{article.source}</span>
             {article.published && <time className="shrink-0">{new Date(article.published).toLocaleDateString()}</time>}
           </div>
+          {article.author && <p className="text-[10px] text-white/45">{t("By {author}", { author: article.author })}</p>}
+          {article.media && (
+            <p className="mt-1 line-clamp-1 text-[10px] text-white/45">
+              {[article.media.language, article.media.city, article.media.region].filter(Boolean).join(" · ")}
+            </p>
+          )}
           <Link href={`/story/${article.id}`} className="mt-1 line-clamp-2 text-sm font-bold leading-snug hover:text-mira-blue-light">
             {article.title}
           </Link>
@@ -25,6 +31,7 @@ export default function ArticleCard({ article, saved, onSave, compact = false, p
           )}
           <div className="mt-auto flex items-center justify-between gap-2 pt-3">
             <Link href={`/story/${article.id}`} className="btn !px-3 !py-1.5 text-[11px]">{t("Read full story")}</Link>
+            {article.url && <a href={article.url} target="_blank" rel="noreferrer" className="text-[11px] text-mira-blue-light hover:text-white">{t("Original source")} ↗</a>}
             <button
               className="btn-ghost !px-3 !py-1.5 text-[11px]"
               onClick={() => onSave(article)}
@@ -47,12 +54,21 @@ export default function ArticleCard({ article, saved, onSave, compact = false, p
           <span>{article.source}</span>
           {article.published && <span>{new Date(article.published).toLocaleDateString()}</span>}
         </div>
+        {article.author && <p className="text-xs text-white/55">{t("By {author}", { author: article.author })}</p>}
+        {article.media && (
+          <div className="media-card-categories">
+            {[article.media.language, article.media.city, article.media.region].filter(Boolean).map((value) => (
+              <span key={value}>{value}</span>
+            ))}
+          </div>
+        )}
         <Link href={`/story/${article.id}`} className="line-clamp-3 font-display text-base font-semibold leading-snug hover:underline">
           {article.title}
         </Link>
         {article.summary && <p className="line-clamp-3 text-sm text-white/75">{article.summary}</p>}
         <div className="mt-auto flex gap-2 pt-2">
           <Link href={`/story/${article.id}`} className="btn !px-4 !py-2 text-xs">{t("Ask this story")}</Link>
+          {article.url && <a href={article.url} target="_blank" rel="noreferrer" className="btn-ghost !px-3 !py-2 text-xs">{t("Original source")} ↗</a>}
           <button className="btn-ghost !px-4 !py-2 text-xs" onClick={() => onSave(article)}>{saved ? t("Saved ✓") : t("Save")}</button>
         </div>
       </div>

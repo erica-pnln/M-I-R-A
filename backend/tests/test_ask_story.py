@@ -56,6 +56,28 @@ class AskStoryTests(unittest.TestCase):
             "news_summarization",
         )
 
+    def test_quick_ask_story_tasks_use_a_smaller_output_budget(self):
+        spec = ask_story.AskStoryModel(
+            provider="test",
+            model="test-model",
+            api_key="test-key",
+            base_url="https://example.test/v1",
+            tasks=ask_story.TASKS,
+        )
+
+        self.assertEqual(
+            ask_story._request(spec, [], "", "story_chat")["max_tokens"],
+            512,
+        )
+        self.assertEqual(
+            ask_story._request(spec, [], "", "research")["max_tokens"],
+            900,
+        )
+        self.assertEqual(
+            ask_story._request(spec, [], "", "article_generation")["max_tokens"],
+            1800,
+        )
+
     def test_gemini_is_dedicated_to_ask_story(self):
         os.environ["GEMINI_API_KEY"] = "mira-chat-key"
         os.environ["ASK_STORY_GEMINI_API_KEY"] = "ask-story-gemini-key"

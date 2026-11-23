@@ -74,19 +74,25 @@ export default function Login() {
   return (
     <div className="auth-layout">
       <section className="auth-story">
-        <Link href="/" className="auth-brand"><img src="/mira-logo.png" alt="" aria-hidden="true" className="h-8 w-8 object-contain" />MIRA</Link>
-        <div>
-          <p className="label">{t("Media intelligence & research assistant")}</p>
-          <h1 className="font-display text-4xl font-bold leading-tight sm:text-5xl">
-            {t("Your next story")}<br />{t("starts here.")}
-          </h1>
-          <p className="mt-4 max-w-md text-sm leading-6 text-white/65">
-            {t("A clearer view of the news, with research and recommendations shaped around your work.")}
-          </p>
-        </div>
-        <div className="auth-story-note">
-          <span className="auth-pulse" />
-          <span>{t("Independent thinking. Smarter discovery.")}</span>
+        <p className="auth-hero-label">{t("AI-powered media intelligence")}</p>
+        <Link href="/" className="auth-brand" aria-label="MIRA home">
+          <img src="/mira-logo.png" alt="MIRA" className="mira-logo-dark auth-logo-blink aspect-square h-auto w-[230px] max-w-full object-contain" />
+          <img src="/mira-logo-light.png" alt="MIRA" className="mira-logo-light auth-logo-blink aspect-square h-auto w-[230px] max-w-full object-contain" />
+        </Link>
+        <div className="auth-story-content">
+          <div className="auth-copy">
+            <h1 className="auth-copy-title font-display text-4xl font-bold leading-tight sm:text-5xl">
+              {t("Go beyond")}<br />
+              <span className="auth-copy-highlight">{t("the headline.")}</span>
+            </h1>
+            <p className="auth-copy-description mt-4 max-w-md text-sm leading-6 text-white/65">
+              {t("MIRA means Media Intelligence & Research Assistant—an AI-powered guide to the news, research, and context that matter to your work.")}
+            </p>
+          </div>
+          <div className="auth-story-note auth-story-note-enter">
+            <span className="auth-pulse" />
+            <span>{t("Independent thinking. Smarter discovery.")}</span>
+          </div>
         </div>
       </section>
 
@@ -136,8 +142,13 @@ export default function Login() {
                 value={confirm} onChange={(event) => setConfirm(event.target.value)} required minLength={6} />
             </label>
           )}
-          <button className="btn w-full !rounded-xl !py-3.5" type="submit" disabled={busy}>
-            {busy ? t("Please wait…") : mode === "in" ? t("Log in") : t("Create account")}
+          <button className="btn w-full !rounded-xl !py-3.5" type="submit" disabled={busy} data-loading="true" aria-busy={busy}>
+            {busy ? (
+              <span className="mira-button-loading" role="status">
+                <span className="mira-button-spinner" aria-hidden="true" />
+                {t("Please wait…")}
+              </span>
+            ) : mode === "in" ? t("Log in") : t("Create account")}
           </button>
           {msg && <p role="status" className="auth-message">{msg}</p>}
         </form>

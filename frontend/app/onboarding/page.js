@@ -123,7 +123,11 @@ export default function Onboarding() {
   return (
     <div className="onboarding-layout">
       <header className="onboarding-header">
-        <Link href="/" className="auth-brand"><img src="/mira-logo.png" alt="" aria-hidden="true" className="h-8 w-8 object-contain" />MIRA</Link>
+        <Link href="/" className="auth-brand">
+          <img src="/mira-logo.png" alt="" aria-hidden="true" className="mira-logo-dark h-8 w-8 object-contain" />
+          <img src="/mira-logo-light.png" alt="" aria-hidden="true" className="mira-logo-light h-8 w-8 object-contain" />
+          MIRA
+        </Link>
         <span className="onboarding-step-label">{t("YOUR PERSONALIZED NEWSROOM")} · {step} {t("OF 2")}</span>
       </header>
 

@@ -136,6 +136,7 @@ body::before {
 
 .mira-sidebar.is-collapsed .mira-brand > span,
 .mira-sidebar.is-collapsed .mira-offline,
+.mira-sidebar.is-collapsed .mira-nav-section-label,
 .mira-sidebar.is-collapsed .mira-nav-label,
 .mira-sidebar.is-collapsed .mira-profile-details {
   display: none;
@@ -179,21 +180,36 @@ body::before {
   text-align: center;
 }
 
+.mira-brand-mark {
+  width: 82px;
+  height: 82px;
+  flex: none;
+  object-fit: contain;
+}
+
 .mira-brand-card {
   display: flex;
   width: 100%;
-  min-height: 54px;
+  min-height: 64px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  margin-top: -14px;
+  margin-top: -12px;
   border: 1px solid rgba(96, 165, 250, 0.16);
   border-radius: 14px;
   background:
-    linear-gradient(145deg, rgba(96, 165, 250, 0.07), rgba(5, 10, 24, 0.4) 60%),
+    linear-gradient(145deg, rgba(96, 165, 250, 0.10), rgba(5, 10, 24, 0.44) 60%),
     rgba(5, 10, 24, 0.42);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
-  padding: 8px 10px;
+  padding: 9px 12px;
+}
+
+.mira-brand-copy {
+  display: flex;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
 }
 
 .mira-sidebar-brand-divider {
@@ -203,13 +219,14 @@ body::before {
   border-top: 1px solid rgba(255, 255, 255, 0.09);
 }
 
-.mira-brand-copy {
-  display: flex;
-  max-width: 100%;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  margin-top: 0;
+.mira-nav-section-label {
+  margin: 0 12px 9px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 0.66rem;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
 .mira-brand-copy strong {
@@ -218,8 +235,16 @@ body::before {
   font-size: 1rem;
   font-weight: 800;
   letter-spacing: 0.035em;
-  line-height: 1.35;
+  line-height: 1.25;
   font-style: italic;
+}
+
+.mira-brand-copy small {
+  color: rgba(255, 255, 255, 0.52);
+  max-width: 190px;
+  font-size: 0.68rem;
+  font-weight: 550;
+  line-height: 1.25;
 }
 
 .mira-nav-links {
@@ -257,10 +282,57 @@ body::before {
   display: grid;
   width: 28px;
   height: 28px;
+  flex: none;
   place-items: center;
   border-radius: 8px;
   color: #60a5fa;
-  font-size: 1.2rem;
+}
+
+.mira-nav-svg {
+  width: 20px;
+  height: 20px;
+}
+
+.mira-nav-icon-home {
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  background: linear-gradient(145deg, rgba(96, 165, 250, 0.2), rgba(37, 99, 235, 0.07));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+  color: #93c5fd;
+}
+
+.mira-nav-icon-news {
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  background: linear-gradient(145deg, rgba(251, 191, 36, 0.18), rgba(217, 119, 6, 0.06));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+  color: #fbbf24;
+}
+
+.mira-nav-icon-podcast {
+  border: 1px solid rgba(192, 132, 252, 0.2);
+  background: linear-gradient(145deg, rgba(192, 132, 252, 0.2), rgba(126, 34, 206, 0.07));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+  color: #c084fc;
+}
+
+.mira-nav-icon-saved {
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  background: linear-gradient(145deg, rgba(52, 211, 153, 0.18), rgba(5, 150, 105, 0.06));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+  color: #34d399;
+}
+
+.mira-nav-icon-history {
+  border: 1px solid rgba(251, 146, 60, 0.2);
+  background: linear-gradient(145deg, rgba(251, 146, 60, 0.18), rgba(234, 88, 12, 0.06));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06);
+  color: #fb923c;
+}
+
+.mira-chat-nav-icon {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+  border-radius: 7px;
 }
 
 .mira-account {
@@ -299,6 +371,12 @@ body::before {
   margin-left: min(var(--mira-sidebar-width), 45vw);
   box-sizing: border-box;
   transition: width 180ms ease, margin-left 180ms ease;
+}
+
+.mira-main.mira-main-auth {
+  width: 100%;
+  max-width: none;
+  margin-left: 0;
 }
 
 .home-dashboard {
@@ -745,7 +823,28 @@ body::before {
 .live-grid, .podcast-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
 .media-discovery-controls { display: grid; gap: 12px; min-width: 0; }
 .media-discovery-hero { align-items: center; }
-.media-discovery-search-hero { width: min(100%, 28rem); flex: 0 1 28rem; }
+.media-discovery-hero {
+  height: 240px;
+  min-height: 240px;
+  padding: 20px 24px;
+  border-radius: 18px;
+}
+.media-discovery-hero .home-hero-actions {
+  width: min(42%, 520px);
+}
+.media-discovery-hero .media-discovery-search-hero {
+  width: 100%;
+  flex: none;
+  min-height: 56px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .38);
+  backdrop-filter: blur(14px);
+}
+.media-discovery-hero-image {
+  background:
+    radial-gradient(circle at 75% 35%, rgba(37,99,235,.35), transparent 40%),
+    linear-gradient(135deg, #0b1222, #111827);
+}
 .media-discovery-search {
   display: flex;
   min-height: 48px;
@@ -789,6 +888,30 @@ body::before {
 .media-preview.home-live-placeholder { height: 120px; min-height: 120px; border-radius: 14px; }
 .media-preview-image, .media-preview-shade { position: absolute; inset: 0; width: 100%; height: 100%; }
 .media-preview-image { z-index: -2; object-fit: cover; transition: transform 350ms ease; }
+.media-preview-logo {
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  left: 50%;
+  width: 76px;
+  height: 76px;
+  transform: translate(-50%, -50%);
+  border-radius: 14px;
+  background: #fff;
+  padding: 8px;
+  object-fit: contain;
+  filter: drop-shadow(0 8px 18px rgba(0,0,0,.4));
+}
+.media-preview-publisher-with-logo {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  left: 12px;
+  max-width: none;
+  font-size: .68rem;
+  letter-spacing: .1em;
+  text-shadow: 0 2px 6px rgba(0,0,0,.8);
+}
 .media-preview-shade { z-index: -1; background: linear-gradient(0deg, rgba(2,6,16,.68), rgba(2,6,16,.08)); }
 .podcast-card:hover .media-preview-image { transform: scale(1.04); }
 .media-preview-publisher { max-width: 80%; color: rgba(255,255,255,.82); font-size: .85rem; font-weight: 800; letter-spacing: .12em; text-align: center; text-transform: uppercase; }
@@ -1083,9 +1206,6 @@ body::before {
   .mira-sidebar.is-collapsed .mira-profile-details {
     display: initial;
   }
-  .mira-sidebar.is-collapsed .mira-brand > .mira-brand-card {
-    display: flex;
-  }
   .mira-sidebar.is-collapsed .mira-brand-copy {
     display: flex;
   }
@@ -1166,12 +1286,41 @@ body::before {
 
 @media (max-width: 900px) {
   .media-discovery-hero {
+    height: auto;
+    min-height: 280px;
     align-items: stretch;
     flex-direction: column;
+    justify-content: center;
+  }
+  .media-discovery-hero .home-hero-copy {
+    max-width: 100%;
+  }
+  .media-discovery-hero .home-hero-actions {
+    width: 100%;
+    align-items: stretch;
   }
   .media-discovery-search-hero {
     width: 100%;
     flex: none;
+  }
+}
+
+@media (max-width: 1279px) {
+  .media-discovery-hero {
+    height: auto;
+    min-height: 220px;
+  }
+}
+
+@media (max-width: 767px) {
+  .media-discovery-hero { min-height: 200px; }
+}
+
+@media (min-width: 768px) and (max-height: 800px) {
+  .media-discovery-hero {
+    height: 240px;
+    min-height: 240px;
+    padding: 20px 24px;
   }
 }
 
@@ -1516,6 +1665,88 @@ body::before {
   min-width: 0;
 }
 
+.newsroom-dashboard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.newsroom-hot-panel {
+  min-width: 0;
+  border: 2px solid rgba(59, 130, 246, 0.48);
+  border-radius: 1rem;
+  background: rgba(0, 0, 0, 0.12);
+  padding: 1.25rem;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.12), 0 14px 36px rgba(0, 0, 0, 0.18);
+}
+
+.newsroom-hot-panel .home-section-heading {
+  margin-bottom: 1rem;
+}
+
+.newsroom-hot-panel .home-section-heading button {
+  color: #60a5fa;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.newsroom-hot-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.newsroom-hot-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem 1.25rem;
+}
+
+.newsroom-hot-list li {
+  display: grid;
+  grid-template-columns: 1.75rem 4.75rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  min-height: 4rem;
+}
+
+.newsroom-hot-rank {
+  display: grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border-radius: 50%;
+  background: #174ca6;
+  color: white;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.newsroom-hot-image {
+  width: 4.75rem;
+  height: 3.25rem;
+  border-radius: 0.4rem;
+}
+
+.newsroom-hot-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 1rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.newsroom-hot-title:hover {
+  color: #93c5fd;
+}
+
 .dashboard-compact-card {
   display: flex;
   flex-direction: column;
@@ -1623,6 +1854,12 @@ body::before {
   }
 }
 
+@media (min-width: 768px) {
+  .newsroom-hot-columns {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -1648,6 +1885,74 @@ body::before {
 }
 
 .btn-ghost:hover { background: rgba(255, 255, 255, 0.15); }
+
+.mira-loading-spinner,
+.mira-button-spinner {
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  border-top-color: #60a5fa;
+  border-radius: 999px;
+  animation: mira-spin 700ms linear infinite;
+}
+
+.mira-loading-spinner {
+  width: 34px;
+  height: 34px;
+  border-width: 3px;
+  box-shadow: 0 0 18px rgba(96, 165, 250, 0.28);
+}
+
+.mira-button-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.mira-button-spinner {
+  width: 16px;
+  height: 16px;
+}
+
+.mira-route-loading {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.mira-activity-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  background: rgba(2, 6, 18, 0.58);
+  color: #fff;
+  font-size: 0.875rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(5px);
+  pointer-events: all;
+}
+
+@keyframes mira-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mira-loading-spinner,
+  .mira-button-spinner {
+    animation-duration: 1.6s;
+  }
+}
 
 .chip {
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -1693,6 +1998,310 @@ body::before {
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--mira-blue-light);
+}
+
+/* Light appearance */
+html[data-mira-theme="light"] {
+  color-scheme: light;
+  background: #f4f7fb;
+  --mira-blue-light: #2563eb;
+}
+
+html[data-mira-theme="light"] body {
+  color: #000000;
+  background: transparent;
+}
+
+html[data-mira-theme="light"] body::before {
+  background:
+    radial-gradient(circle 110px at 92% 8%, rgba(59, 130, 246, 0.12) 0, rgba(37, 99, 235, 0.05) 70%, transparent 100%),
+    radial-gradient(circle 70px at 6% 58%, rgba(96, 165, 250, 0.10) 0, transparent 75%),
+    linear-gradient(180deg, #f8fafc 0%, #eef4fb 100%);
+}
+
+html[data-mira-theme="light"] .mira-sidebar {
+  border-right-color: rgba(15, 23, 42, 0.10);
+  background: rgba(255, 255, 255, 0.94);
+}
+
+html[data-mira-theme="light"] .mira-brand-card,
+html[data-mira-theme="light"] .mira-sidebar-toggle,
+html[data-mira-theme="light"] .glass,
+html[data-mira-theme="light"] .input,
+html[data-mira-theme="light"] .chip,
+html[data-mira-theme="light"] .btn-ghost {
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+html[data-mira-theme="light"] .mira-brand-card {
+  background: linear-gradient(145deg, rgba(96, 165, 250, 0.10), rgba(255, 255, 255, 0.82));
+}
+
+html[data-mira-theme="light"] .mira-brand-copy strong,
+html[data-mira-theme="light"] .mira-nav-link,
+html[data-mira-theme="light"] .mira-sidebar-toggle,
+html[data-mira-theme="light"] .chip,
+html[data-mira-theme="light"] .btn-ghost,
+html[data-mira-theme="light"] .input {
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .mira-brand-copy small,
+html[data-mira-theme="light"] .mira-nav-section-label {
+  color: rgba(23, 32, 51, 0.55);
+}
+
+html[data-mira-theme="light"] .mira-nav-link {
+  color: rgba(23, 32, 51, 0.68);
+}
+
+html[data-mira-theme="light"] .mira-nav-link:hover,
+html[data-mira-theme="light"] .mira-nav-link.is-active {
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .mira-nav-link:hover,
+html[data-mira-theme="light"] .mira-profile:hover {
+  background: rgba(37, 99, 235, 0.07);
+}
+
+html[data-mira-theme="light"] .mira-nav-link.is-active {
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.16), rgba(37, 99, 235, 0.06));
+}
+
+html[data-mira-theme="light"] .mira-account,
+html[data-mira-theme="light"] .mira-sidebar-brand-divider {
+  border-top-color: rgba(15, 23, 42, 0.10);
+}
+
+html[data-mira-theme="light"] .glass {
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 14px 34px rgba(37, 99, 235, 0.10);
+}
+
+html[data-mira-theme="light"] .btn-ghost {
+  background: rgba(37, 99, 235, 0.06);
+}
+
+html[data-mira-theme="light"] .btn-ghost:hover {
+  background: rgba(37, 99, 235, 0.12);
+}
+
+html[data-mira-theme="light"] .chip {
+  background: rgba(37, 99, 235, 0.05);
+}
+
+html[data-mira-theme="light"] .chip-on {
+  border-color: transparent;
+  background: var(--mira-blue);
+  color: #fff;
+}
+
+html[data-mira-theme="light"] .input {
+  background: rgba(255, 255, 255, 0.82);
+}
+
+html[data-mira-theme="light"] .input::placeholder {
+  color: rgba(23, 32, 51, 0.50);
+}
+
+html[data-mira-theme="light"] .text-white { color: #172033; }
+html[data-mira-theme="light"] .text-white\/95 { color: rgba(23, 32, 51, 0.95); }
+html[data-mira-theme="light"] .text-white\/90 { color: rgba(23, 32, 51, 0.90); }
+html[data-mira-theme="light"] .text-white\/85 { color: rgba(23, 32, 51, 0.85); }
+html[data-mira-theme="light"] .text-white\/75 { color: rgba(23, 32, 51, 0.75); }
+html[data-mira-theme="light"] .text-white\/70 { color: rgba(23, 32, 51, 0.70); }
+html[data-mira-theme="light"] .text-white\/65 { color: rgba(23, 32, 51, 0.65); }
+html[data-mira-theme="light"] .text-white\/60 { color: rgba(23, 32, 51, 0.60); }
+html[data-mira-theme="light"] .text-white\/55 { color: rgba(23, 32, 51, 0.55); }
+html[data-mira-theme="light"] .text-white\/50 { color: rgba(23, 32, 51, 0.50); }
+html[data-mira-theme="light"] .text-white\/45 { color: rgba(23, 32, 51, 0.45); }
+html[data-mira-theme="light"] .text-white\/40 { color: rgba(23, 32, 51, 0.40); }
+
+/* Light mode should use crisp black text instead of muted gray text. */
+html[data-mira-theme="light"] .text-white,
+html[data-mira-theme="light"] .text-white\/95,
+html[data-mira-theme="light"] .text-white\/90,
+html[data-mira-theme="light"] .text-white\/85,
+html[data-mira-theme="light"] .text-white\/75,
+html[data-mira-theme="light"] .text-white\/70,
+html[data-mira-theme="light"] .text-white\/65,
+html[data-mira-theme="light"] .text-white\/60,
+html[data-mira-theme="light"] .text-white\/55,
+html[data-mira-theme="light"] .text-white\/50,
+html[data-mira-theme="light"] .text-white\/45,
+html[data-mira-theme="light"] .text-white\/40 {
+  color: #000000;
+}
+
+html[data-mira-theme="light"] .mira-brand img,
+html[data-mira-theme="light"] .mira-sidebar-toggle img,
+html[data-mira-theme="light"] .mira-mobile-toggle img,
+html[data-mira-theme="light"] .auth-logo-blink,
+html[data-mira-theme="light"] .auth-brand img {
+  filter: none;
+  opacity: 1;
+  mix-blend-mode: normal;
+}
+
+.mira-logo-light {
+  display: none;
+}
+
+.mira-logo-dark {
+  display: block;
+}
+
+html[data-mira-theme="light"] .mira-logo-dark {
+  display: none;
+}
+
+html[data-mira-theme="light"] .mira-logo-light {
+  display: block;
+}
+
+html[data-mira-theme="light"] .mira-brand-copy strong,
+html[data-mira-theme="light"] .mira-nav-link,
+html[data-mira-theme="light"] .mira-profile-details,
+html[data-mira-theme="light"] .mira-profile-details small,
+html[data-mira-theme="light"] .home-section-heading h2,
+html[data-mira-theme="light"] .home-live-copy strong,
+html[data-mira-theme="light"] .home-podcast-item strong,
+html[data-mira-theme="light"] .home-regional-item strong,
+html[data-mira-theme="light"] .home-top-news-item,
+html[data-mira-theme="light"] .home-trending-item,
+html[data-mira-theme="light"] .home-empty {
+  color: #000000;
+}
+
+html[data-mira-theme="light"] .border-white\/10,
+html[data-mira-theme="light"] .border-white\/15,
+html[data-mira-theme="light"] .border-white\/20,
+html[data-mira-theme="light"] .border-white\/25,
+html[data-mira-theme="light"] .divide-white\/10 {
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+html[data-mira-theme="light"] .bg-white\/\[\.06\],
+html[data-mira-theme="light"] .bg-white\/\[\.05\],
+html[data-mira-theme="light"] .bg-white\/\[\.04\],
+html[data-mira-theme="light"] .bg-white\/\[\.03\],
+html[data-mira-theme="light"] .bg-white\/10,
+html[data-mira-theme="light"] .bg-white\/15 {
+  background-color: rgba(37, 99, 235, 0.06);
+}
+
+/* Keep the entire application surface in the selected light theme. */
+html[data-mira-theme="light"] .home-hero-showcase {
+  background: linear-gradient(135deg, #eaf2ff, #f8fbff);
+}
+
+html[data-mira-theme="light"] .home-hero-backdrop {
+  background: radial-gradient(circle at 75% 35%, rgba(37, 99, 235, 0.12), transparent 42%);
+}
+
+html[data-mira-theme="light"] .home-hero-backdrop::after {
+  background:
+    linear-gradient(90deg, rgba(248, 251, 255, 0.96), rgba(248, 251, 255, 0.72) 52%, rgba(248, 251, 255, 0.28)),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.15), transparent 68%);
+}
+
+html[data-mira-theme="light"] .home-hero-copy,
+html[data-mira-theme="light"] .home-hero-actions,
+html[data-mira-theme="light"] .home-search {
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .home-search,
+html[data-mira-theme="light"] .home-hero-controls,
+html[data-mira-theme="light"] .home-live-item,
+html[data-mira-theme="light"] .home-podcast-item,
+html[data-mira-theme="light"] .home-empty,
+html[data-mira-theme="light"] .home-regional-item,
+html[data-mira-theme="light"] .home-top-news-item,
+html[data-mira-theme="light"] .home-trending-item {
+  border-color: rgba(15, 23, 42, 0.10);
+  background-color: rgba(255, 255, 255, 0.82);
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .home-search {
+  border-color: rgba(37, 99, 235, 0.18);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.10);
+}
+
+html[data-mira-theme="light"] .home-search input,
+html[data-mira-theme="light"] .home-search {
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .home-search input::placeholder {
+  color: rgba(23, 32, 51, 0.48);
+}
+
+html[data-mira-theme="light"] .home-hero-controls {
+  border-color: rgba(37, 99, 235, 0.14);
+  background: rgba(255, 255, 255, 0.86);
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .home-hero-controls button {
+  background: rgba(37, 99, 235, 0.08);
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .home-live-copy small,
+html[data-mira-theme="light"] .home-podcast-item small,
+html[data-mira-theme="light"] .home-live-preview p,
+html[data-mira-theme="light"] .home-regional-item small,
+html[data-mira-theme="light"] .home-empty {
+  color: rgba(23, 32, 51, 0.58);
+}
+
+html[data-mira-theme="light"] .home-empty {
+  background: rgba(37, 99, 235, 0.04);
+}
+
+html[data-mira-theme="light"] .auth-layout,
+html[data-mira-theme="light"] .onboarding-layout,
+html[data-mira-theme="light"] .auth-card,
+html[data-mira-theme="light"] .onboarding-card,
+html[data-mira-theme="light"] .research-panel,
+html[data-mira-theme="light"] .media-discovery-controls,
+html[data-mira-theme="light"] .media-card,
+html[data-mira-theme="light"] .podcast-card,
+html[data-mira-theme="light"] .history-panel {
+  border-color: rgba(15, 23, 42, 0.10);
+  background: rgba(255, 255, 255, 0.88);
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .auth-field > span,
+html[data-mira-theme="light"] .auth-message,
+html[data-mira-theme="light"] .media-card-categories span {
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .auth-message,
+html[data-mira-theme="light"] .media-card-categories span {
+  background: rgba(37, 99, 235, 0.08);
+  border-color: rgba(37, 99, 235, 0.16);
+}
+
+html[data-mira-theme="light"] .bg-\[\#101827\],
+html[data-mira-theme="light"] .bg-\[\#0c1422\],
+html[data-mira-theme="light"] .bg-\[\#111827\],
+html[data-mira-theme="light"] .bg-\[\#0b1220\],
+html[data-mira-theme="light"] .bg-slate-950\/80,
+html[data-mira-theme="light"] .bg-black\/20 {
+  border-color: rgba(15, 23, 42, 0.10);
+  background: rgba(255, 255, 255, 0.94);
+  color: #172033;
+}
+
+html[data-mira-theme="light"] .divide-white\/10 > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(15, 23, 42, 0.10);
 }
 
 .profile-page {
@@ -2110,23 +2719,92 @@ body::before {
   display: flex;
   min-height: 430px;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: center;
+  gap: clamp(0.75rem, 2vh, 1.25rem);
+}
+
+.auth-story-content {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(1.25rem, 3vh, 2rem);
+}
+
+.auth-copy {
+  text-align: center;
+}
+
+.auth-copy-highlight {
+  color: var(--mira-blue-light);
+}
+
+.auth-copy-description {
+  margin-right: auto;
+  margin-left: auto;
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 1.75;
+}
+
+.auth-hero-label {
+  max-width: 100%;
+  align-self: center;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--mira-blue-light);
+  font-family: var(--font-display), sans-serif;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  line-height: 1.2;
+  padding: 0.55rem 0.9rem;
+  text-align: center;
+  text-transform: uppercase;
 }
 
 .auth-brand {
-  display: inline-flex;
-  width: fit-content;
+  display: flex;
+  width: min(100%, 260px);
+  aspect-ratio: 1;
   align-items: center;
-  gap: 0.65rem;
-  font-family: var(--font-display), sans-serif;
-  font-size: 1.15rem;
-  font-weight: 800;
-  letter-spacing: 0.22em;
+  justify-content: center;
+  align-self: center;
+  border: 1px solid rgba(96, 165, 250, 0.16);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(37, 99, 235, 0.18), rgba(5, 10, 24, 0.28) 68%);
+  box-shadow: inset 0 0 35px rgba(37, 99, 235, 0.1), 0 0 55px rgba(37, 99, 235, 0.08);
+}
+
+.auth-logo-blink {
+  animation: auth-logo-blink 2.8s ease-in-out infinite;
+}
+
+.auth-hero-label,
+.auth-copy-title,
+.auth-copy-description,
+.auth-story-note-enter {
+  animation: auth-text-enter 650ms ease-out both;
+}
+
+.auth-hero-label { animation-delay: 80ms; }
+.auth-copy-title { animation-delay: 100ms; }
+.auth-copy-description { animation-delay: 200ms; }
+.auth-story-note-enter { animation-delay: 300ms; }
+
+@keyframes auth-logo-blink {
+  0%, 100% { opacity: 1; filter: drop-shadow(0 0 0 rgba(96, 165, 250, 0)); }
+  50% { opacity: 0.78; filter: drop-shadow(0 0 18px rgba(96, 165, 250, 0.48)); }
+}
+
+@keyframes auth-text-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .auth-story-note {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.7rem;
   color: rgba(255, 255, 255, 0.5);
   font-size: 0.75rem;
@@ -2147,6 +2825,16 @@ body::before {
   background: linear-gradient(150deg, rgba(19, 30, 55, 0.9), rgba(7, 12, 25, 0.82));
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42), inset 0 1px rgba(255, 255, 255, 0.06);
   backdrop-filter: blur(28px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-logo-blink,
+  .auth-hero-label,
+  .auth-copy-title,
+  .auth-copy-description,
+  .auth-story-note-enter {
+    animation: none;
+  }
 }
 
 .auth-switch {
@@ -2348,4 +3036,13 @@ body::before {
   .onboarding-option { min-height: 3rem; padding: 0.55rem; font-size: 0.68rem; }
   .onboarding-footer { align-items: flex-start; flex-direction: column; }
   .onboarding-footer > div { width: 100%; justify-content: flex-end; }
+}
+
+.mira-nav-link-live .mira-nav-icon {
+  color: #f51e25;
+}
+
+.mira-nav-link-live .mira-nav-label {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }

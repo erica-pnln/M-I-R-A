@@ -181,7 +181,16 @@ export default function Story() {
 
         <aside className="glass p-5 lg:sticky lg:top-24">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <h2 className="font-display text-xl">{t("Ask This Story")}</h2>
+            <div className="flex items-center gap-2.5">
+              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-mira-blue-light/20 bg-white/[.04] p-1">
+                <img
+                  src="/mira-chat.png"
+                  alt="MIRA Chat AI"
+                  className="h-full w-full object-contain"
+                />
+              </div>
+              <h2 className="font-display text-xl">{t("Ask This Story")}</h2>
+            </div>
             <Link href="/ask-story/history" className="btn-ghost !px-3 !py-1.5 text-xs">
               {t("Conversation history")}
             </Link>

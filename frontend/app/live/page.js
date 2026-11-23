@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { getCachedNews, putCachedNews } from "@/lib/newsCache";
-import { getDirectLivePageUrl, getDirectLiveUrl } from "@/lib/media";
+import { getDirectLivePageUrl, getDirectLiveUrl, getOfficialRadioSourceUrl } from "@/lib/media";
 import { getLiveCategories, getMediaSearchScore } from "@/lib/mediaDiscovery";
 import MediaPreview from "@/components/MediaPreview";
 import { MediaDiscoveryCategories, MediaDiscoverySearch } from "@/components/MediaDiscoveryControls";
@@ -14,7 +14,9 @@ const LIVE_CATEGORIES = [
   "International Broadcasters",
   "Government & Official Channels",
   "Radio Broadcasters",
+  "Community Radio Stations",
   "Sports Broadcasters",
+  "Television News Broadcasters",
   "Weather & Disaster Coverage",
 ];
 
@@ -34,11 +36,12 @@ function getOfflineLiveChannels(channels) {
 function LiveChannelCard({ channel }) {
   const streamUrl = getDirectLiveUrl(channel.url, channel.is_live === true);
   const livePageUrl = getDirectLivePageUrl(channel.live_page_url);
-  const destination = streamUrl || livePageUrl;
+  const sourceUrl = getOfficialRadioSourceUrl(channel.source_page_url);
+  const destination = streamUrl || livePageUrl || sourceUrl;
   const categories = getLiveCategories(channel);
   const content = (
     <>
-      <MediaPreview kind="live" image={channel.image} publisher={channel.publisher} title={channel.title} isLive={channel.is_live === true} />
+      <MediaPreview kind="live" image={channel.image} logo={channel.logo_url} publisher={channel.publisher} title={channel.title} isLive={channel.is_live === true} />
       <div className="p-4">
         <p className="text-xs font-bold uppercase tracking-wider text-mira-blue-light">{channel.publisher}</p>
         <h3 className="mt-1 font-display text-lg font-bold">{channel.title}</h3>
@@ -50,10 +53,14 @@ function LiveChannelCard({ channel }) {
         {destination ? (
           <>
             <p className="mt-3 text-xs text-white/50">
-              {streamUrl ? "Verified active broadcast." : "Open the broadcaster’s official live page for current availability."}
+              {streamUrl
+                ? "Verified active broadcast."
+                : livePageUrl
+                  ? "Open the broadcaster’s official live page for current availability."
+                  : "Official broadcaster source. A live stream may not be available there."}
             </p>
             <span className="btn mt-3 inline-block !px-4 !py-2 text-xs">
-              {streamUrl ? "Watch Live ↗" : "Open Live Page ↗"}
+              {streamUrl ? "Watch Live ↗" : livePageUrl ? "Open Live Page ↗" : "Visit Official Source ↗"}
             </span>
           </>
         ) : <p className="mt-4 text-xs text-white/50">No direct live page is currently verified.</p>}
@@ -77,6 +84,10 @@ export default function LivePage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All Channels");
+  const categories = [...new Set([
+    ...LIVE_CATEGORIES,
+    ...channels.flatMap((channel) => getLiveCategories(channel)),
+  ])];
 
   useEffect(() => {
     let cancelled = false;
@@ -137,26 +148,42 @@ export default function LivePage() {
       channel,
       score: search.trim() ? getMediaSearchScore(channel, search, "live") : 1,
     }))
-    .filter(({ channel, score }) => !search.trim() || (channel.is_live === true && score > 0))
+    .filter(({ score }) => !search.trim() || score > 0)
     .sort((left, right) => right.score - left.score)
     .map(({ channel }) => channel);
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-5">
-      <header className="glass dashboard-hero media-discovery-hero">
-        <div><p className="label">Trusted coverage</p><h1 className="font-display text-3xl font-bold">Live News</h1></div>
-        <MediaDiscoverySearch
-          className="media-discovery-search-hero"
-          searchValue={search}
-          onSearchChange={setSearch}
-          searchLabel="Search live broadcasts"
-          placeholder="Search active broadcasts, topics, or channels"
-        />
+      <header className="home-hero home-hero-showcase media-discovery-hero glass">
+        {channels[0] && (
+          <div
+            className="home-hero-backdrop media-discovery-hero-image"
+            style={channels[0].image || channels[0].channel_image ? {
+              backgroundImage: `linear-gradient(90deg, rgba(0,0,0,.88), rgba(0,0,0,.28)), url("${channels[0].image || channels[0].channel_image}")`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+            } : undefined}
+            aria-hidden="true"
+          />
+        )}
+        <div className="home-hero-copy">
+          <p className="label">Trusted coverage</p>
+          <h1 className="font-display">{channels[0]?.title || "Live News"}</h1>
+        </div>
+        <div className="home-hero-actions">
+          <MediaDiscoverySearch
+            className="media-discovery-search-hero"
+            searchValue={search}
+            onSearchChange={setSearch}
+            searchLabel="Search live broadcasts"
+            placeholder="Search stations, publishers, languages, or locations"
+          />
+        </div>
       </header>
       {error && <p role="status" className="rounded-2xl border border-amber-300/20 bg-amber-300/5 px-4 py-3 text-sm text-white/70">{error}</p>}
       {notice && <p className="rounded-2xl border border-blue-300/20 bg-blue-300/5 px-4 py-3 text-sm text-white/70">{notice}</p>}
       <MediaDiscoveryCategories
-        categories={LIVE_CATEGORIES}
+        categories={categories}
         selectedCategory={selectedCategory}
         onSelectCategory={setSelectedCategory}
       />
@@ -169,7 +196,7 @@ export default function LivePage() {
       ) : (
         <p className="home-empty" role="status">
           {search.trim()
-            ? `No active live broadcasts match “${search.trim()}”. Try another keyword or category.`
+            ? `No stations or broadcasts match “${search.trim()}”. Try another keyword or category.`
             : selectedCategory === "All Channels"
               ? "No verified broadcaster channels are available right now."
               : `No broadcaster channels are currently available in ${selectedCategory}.`}

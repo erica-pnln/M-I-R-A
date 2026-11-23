@@ -15,6 +15,36 @@ const PODCAST_CATEGORIES = [
   "Educational & Campus Media",
   "Government & Institutional Media",
   "International Publishers",
+  "DZRH",
+  "GMA News",
+  "RMN",
+  "Bombo Radyo",
+  "Aksyon Radyo",
+  "Brigada News FM",
+  "Radyo Pilipinas",
+  "Radyo5",
+  "Radyo Veritas",
+  "Independent Philippine Podcast Creators",
+  "Regional Radio Networks",
+  "Philippine Campus Journalism and Educational Media",
+  "Tagalog / Filipino",
+  "Bisaya / Cebuano",
+  "Waray",
+  "Hiligaynon",
+  "Ilocano",
+  "Bicolano",
+  "English",
+  "Other Philippine Regional Languages",
+  "National News",
+  "Regional News",
+  "Politics & Government",
+  "Investigative Journalism",
+  "Public Affairs",
+  "Business & Economy",
+  "Sports",
+  "Community News",
+  "Interviews",
+  "Current Affairs",
 ];
 
 function PodcastEpisodeCard({ episode }) {
@@ -26,6 +56,11 @@ function PodcastEpisodeCard({ episode }) {
       <div className="podcast-card-copy">
         <p className="text-xs font-bold text-mira-blue-light">{episode.publisher}</p>
         <h2 className="mt-1 line-clamp-3 font-display text-lg font-bold">{episode.title}</h2>
+        {episode.media && (
+          <p className="mt-1 text-xs text-white/50">
+            {[episode.media.language, episode.media.city, episode.media.region].filter(Boolean).join(" · ")}
+          </p>
+        )}
         {categories.length > 0 && (
           <div className="media-card-categories">
             {categories.map((category) => <span key={category}>{category}</span>)}
@@ -58,12 +93,16 @@ export default function PodcastPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All Publishers");
+  const categories = [...new Set([
+    ...PODCAST_CATEGORIES,
+    ...episodes.flatMap((episode) => getPodcastCategories(episode)),
+  ])];
 
   useEffect(() => {
     let cancelled = false;
     async function loadEpisodes() {
       let cached = null;
-      for (const key of ["podcasts:18", "home:podcasts"]) {
+      for (const key of ["podcasts:30", "podcasts:18", "home:podcasts"]) {
         try {
           cached = await getCachedNews(key);
         } catch (cacheError) {
@@ -84,10 +123,10 @@ export default function PodcastPage() {
       }
 
       try {
-        const result = await api("/api/podcasts?limit=18");
+        const result = await api("/api/podcasts?limit=30");
         if (cancelled) return;
         setEpisodes(result.episodes || []);
-        putCachedNews("podcasts:18", result).catch((cacheError) => {
+        putCachedNews("podcasts:30", result).catch((cacheError) => {
           console.warn("Could not save cached MIRA podcast episodes:", cacheError);
         });
       } catch (requestError) {
@@ -121,19 +160,35 @@ export default function PodcastPage() {
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-5">
-      <header className="glass dashboard-hero media-discovery-hero">
-        <div><p className="label">Audio journalism</p><h1 className="font-display text-3xl font-bold">Podcasts</h1></div>
-        <MediaDiscoverySearch
-          className="media-discovery-search-hero"
-          searchValue={search}
-          onSearchChange={setSearch}
-          searchLabel="Search podcast episodes"
-          placeholder="Search episode topics, titles, publishers, or genres"
-        />
+      <header className="home-hero home-hero-showcase media-discovery-hero glass">
+        {episodes[0] && (
+          <div
+            className="home-hero-backdrop media-discovery-hero-image"
+            style={episodes[0].image ? {
+              backgroundImage: `linear-gradient(90deg, rgba(0,0,0,.88), rgba(0,0,0,.28)), url("${episodes[0].image}")`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+            } : undefined}
+            aria-hidden="true"
+          />
+        )}
+        <div className="home-hero-copy">
+          <p className="label">Audio journalism</p>
+          <h1 className="font-display">{episodes[0]?.title || "Podcasts"}</h1>
+        </div>
+        <div className="home-hero-actions">
+          <MediaDiscoverySearch
+            className="media-discovery-search-hero"
+            searchValue={search}
+            onSearchChange={setSearch}
+            searchLabel="Search podcast episodes"
+            placeholder="Search episodes, publishers, languages, or topics"
+          />
+        </div>
       </header>
       {error && <p role="status" className="rounded-2xl border border-amber-300/20 bg-amber-300/5 px-4 py-3 text-sm text-white/70">{error}</p>}
       <MediaDiscoveryCategories
-        categories={PODCAST_CATEGORIES}
+        categories={categories}
         selectedCategory={selectedCategory}
         onSelectCategory={setSelectedCategory}
       />

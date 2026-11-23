@@ -66,6 +66,7 @@ create table if not exists articles (
   title text not null,
   summary text not null default '',
   source text not null,
+  author text,
   section text not null check (section in ('local', 'regional', 'national', 'international')),
   category text,
   url text not null,
@@ -73,6 +74,8 @@ create table if not exists articles (
   published timestamptz,
   collected_at timestamptz not null default now()
 );
+
+alter table articles add column if not exists author text;
 
 do $$
 begin

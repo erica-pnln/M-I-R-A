@@ -1,8 +1,9 @@
 import "./globals.css";
 import { Manrope, Space_Grotesk } from "next/font/google";
-import Nav from "@/components/Nav";
 import { LanguageProvider } from "@/components/LanguageProvider";
 import RegisterSW from "@/components/RegisterSW";
+import AppShell from "@/components/AppShell";
+import ThemeProvider from "@/components/ThemeProvider";
 
 const body = Manrope({ subsets: ["latin"], variable: "--font-body" });
 const display = Space_Grotesk({ subsets: ["latin"], variable: "--font-display" });
@@ -19,13 +20,12 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <body className={`${body.variable} ${display.variable} font-body`}>
-        <LanguageProvider>
-          <div id="app-root">
-            <Nav />
-            <main className="mira-main mx-auto w-full max-w-[1800px] px-4 py-5 sm:px-6 lg:px-8">{children}</main>
-          </div>
-          <RegisterSW />
-        </LanguageProvider>
+        <ThemeProvider>
+          <LanguageProvider>
+            <AppShell>{children}</AppShell>
+            <RegisterSW />
+          </LanguageProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

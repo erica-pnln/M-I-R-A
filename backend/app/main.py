@@ -9,7 +9,7 @@ import math
 import re
 import threading
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import PurePath
 from urllib.parse import unquote, urlsplit
 
@@ -25,6 +25,11 @@ from . import ai, ask_story, ask_story_research, intelligence, news
 from .auth import optional_user, require_user
 from .config import CORS_ORIGINS, NEWS_REFRESH_TOKEN
 from .db import sb
+from .media_sources import (
+    classify_publisher,
+    live_channels as radio_live_channels,
+    podcast_categories,
+)
 
 app = FastAPI(title="MIRA API", version="0.1.0")
 logger = logging.getLogger(__name__)
@@ -48,12 +53,28 @@ _TRUSTED_NEWS_DOMAINS = {
 _RESEARCH_CONTEXT_MARKER = re.compile(r"<!--MIRA_RESEARCH:([A-Za-z0-9_-]+)-->")
 _RESEARCH_QUERY_NOISE = {
     "about", "affect", "are", "breaking", "can", "could", "current", "find",
-    "fresh", "freshest", "happening", "important", "last", "latest", "me", "month",
-    "most", "new", "newest", "news", "now", "number", "of", "past", "recent",
-    "recently", "right", "show", "stories", "story", "the", "this", "today", "top",
-    "trend", "trending", "trends", "week", "what", "whats", "why", "with", "would",
-    "year", "yesterday", "you",
+    "describe", "explain", "fresh", "freshest", "give", "happen", "happening",
+    "help", "important", "last", "latest", "make", "me", "month", "most", "need",
+    "new", "newest", "news", "now", "number", "of", "past", "please", "recent",
+    "recently", "right", "show", "stories", "story", "tell", "the", "this", "today",
+    "top", "trend", "trending", "trends", "want", "week", "what", "whats", "why",
+    "with", "would", "year", "yesterday", "you", "at", "least", "many", "more",
+    "needed", "related", "topic", "sources", "source", "links", "citations",
+    "references", "image", "images", "identify", "analysis", "analyze", "describe",
+    "5ws", "1h", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten",
 }
+_ASSISTANT_TOPIC_NOISE = {
+    "answer", "based", "claim", "claims", "current", "database", "evidence",
+    "exact", "frame", "image", "news", "note", "provided", "readable", "records",
+    "related", "report", "research", "source", "sources", "story", "text",
+    "uncertainty", "unverified", "verified", "visible", "visual", "who", "what",
+    "when", "where", "why", "how",
+}
+_SOURCE_LIST_REQUEST = re.compile(
+    r"\b(?:sources?|citations?|references?|links?)\b",
+    re.IGNORECASE,
+)
 _RESEARCH_TOPICS = {
     "sports": ("sports", "sport", "basketball", "football", "soccer", "volleyball", "athlete"),
     "politics": ("politics", "political", "government", "election", "senate", "congress"),
@@ -88,6 +109,13 @@ _CONTEXTUAL_FOLLOWUP = re.compile(
     r"number|item|the first|the second|the third|above|follow[- ]?up)\b",
     re.IGNORECASE,
 )
+_LIVE_RESEARCH_REQUEST = re.compile(
+    r"\b(?:latest|current|today|yesterday|recent|news|reported|reporting|"
+    r"source|sources|fact[- ]?check|verify|claim|evidence|what happened|"
+    r"what(?:'s| is) happening)\b",
+    re.IGNORECASE,
+)
+_NON_RESEARCH_CHAT = {"hello", "hey", "hi", "thanks", "thank", "okay", "ok", "bye"}
 _ORDINAL_WORDS = {
     "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
     "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
@@ -109,6 +137,11 @@ def preload_news_cache() -> None:
     except Exception:
         logger.exception("Could not preload the stored news cache")
     news.start_refresh_background()
+    threading.Thread(
+        target=intelligence.preload_semantic_search,
+        name="mira-search-model",
+        daemon=True,
+    ).start()
 
 
 class Msg(BaseModel):
@@ -325,16 +358,28 @@ def _research_chat_system(
                 f"Published: {published.date().isoformat() if published else 'unavailable'}; "
                 f"Publisher: {source.get('source') or 'unavailable'}"
             )
-        system += "\n\nStored record metadata:\n" + "\n".join(metadata)
+        system += "\n\nRetrieved record metadata:\n" + "\n".join(metadata)
     system += (
-        "\n\nResearch Desk requirements: use only the supplied MIRA news records for "
-        "news facts. Do not browse or rely on outside knowledge for current events. "
-        "Cite every factual news claim immediately with relevant [S#] citations. "
+        "\n\nResearch Desk requirements: complete the user's requested journalism task. "
+        "For current-news facts, use only the supplied relevant [S#] sources, which may "
+        "include fresh news-search results as well as MIRA's stored records. Cite factual "
+        "news claims with relevant [S#] citations. "
         "Never invent article counts, engagement metrics, source details, or event facts. "
         "Clearly distinguish reported claims from analysis; label implications and "
-        "journalism insights as analysis, not established fact. If records do not "
-        "support an answer, say that MIRA's current records are insufficient."
+        "journalism insights as analysis, not established fact. Answer general-knowledge "
+        "and journalism-method questions directly without forcing news citations. Treat "
+        "prior assistant replies as topic context only, never as evidence. When the user "
+        "asks for sources, list only supplied sources that directly relate to the requested "
+        "topic; do not pad with unrelated stories. If fewer relevant sources were retrieved "
+        "than requested, state the actual number. If none were retrieved, say that plainly "
+        "and offer a focused next step without claiming that no reporting exists."
     )
+    if research.get("live_search_failed"):
+        system += (
+            "\nThe live news search failed. Do not describe stored records as current "
+            "or imply that a fresh search succeeded. Disclose this limitation when it "
+            "affects the answer."
+        )
     if research.get("prefix"):
         system += (
             "\nThe following deterministic trend list is already being shown to the "
@@ -461,7 +506,13 @@ def _stream_chat_response(
             if prefix:
                 response_text = f"{prefix}\n\n{response_text}".strip()
             reply = (
-                _append_research_source_references(response_text, sources)
+                _append_research_source_references(
+                    response_text,
+                    sources,
+                    include_all_sources=bool(
+                        research.get("include_all_sources")
+                    ),
+                )
                 if research else ai.append_source_references(
                     response_text, sources, article
                 )
@@ -583,6 +634,104 @@ def _retrieve(
             result.pop("image_url", None)
         clean_results.append(result)
     return clean_results
+
+
+def _is_contextual_followup(prompt: str) -> bool:
+    return bool(_CONTEXTUAL_FOLLOWUP.search(prompt)) or len(
+        intelligence._tokens(_research_query(prompt))
+    ) <= 1
+
+
+def _assistant_topic_query(messages: list[dict]) -> str:
+    previous_assistant = next(
+        (
+            str(message.get("content") or "")
+            for message in reversed(messages)
+            if message.get("role") == "assistant" and message.get("content")
+        ),
+        "",
+    )
+    counts = Counter(
+        token
+        for token in intelligence._tokens(previous_assistant)
+        if token not in _ASSISTANT_TOPIC_NOISE and len(token) > 2
+    )
+    return " ".join(token for token, _count in counts.most_common(8))
+
+
+def _chat_retrieval_query(messages: list[dict]) -> str:
+    prompt = str(messages[-1].get("content") or "")
+    query = _research_query(prompt)
+    if _is_contextual_followup(prompt):
+        previous_user_messages = [
+            str(message.get("content") or "")
+            for message in messages[-6:-1]
+            if message.get("role") == "user" and message.get("content")
+        ]
+        topic_hint = _assistant_topic_query(messages[:-1])
+        context = " ".join((*previous_user_messages[-2:], topic_hint, prompt))
+        query = _research_query(context)
+    return query
+
+
+def _rank_chat_sources(
+    query: str, articles: list[dict], limit: int = 10,
+) -> list[dict]:
+    query_tokens = set(intelligence._tokens(query))
+    if not query_tokens:
+        return []
+
+    candidates = []
+    seen = set()
+    for article in articles:
+        if not _is_trusted_news_article(article):
+            continue
+        key = str(article.get("id") or article.get("url") or "")
+        if key and key not in seen:
+            seen.add(key)
+            candidates.append(article)
+    if not candidates:
+        return []
+
+    ranked, corrected_query = _intelligence_call(
+        intelligence.fast_search, query, candidates, len(candidates)
+    )
+    relevant_tokens = set(intelligence._tokens(corrected_query or query))
+    minimum_matches = min(2, len(relevant_tokens))
+    sources = []
+    for article in ranked:
+        article_tokens = set(intelligence._tokens(
+            f"{article.get('title') or ''} {article.get('summary') or ''}"
+        ))
+        if len(relevant_tokens & article_tokens) >= minimum_matches:
+            sources.append(article)
+            if len(sources) >= limit:
+                break
+    return sources
+
+
+def _trusted_search_articles(articles: list[dict]) -> list[dict]:
+    google_urls = [
+        str(article.get("url") or "")
+        for article in articles
+        if article.get("url")
+    ]
+    google_urls = [
+        url for url in google_urls
+        if news._google_article_id(url)
+    ][:10]
+    decoded_urls = news._decode_google_news_urls(google_urls)
+    trusted = []
+    for article in articles:
+        result = dict(article)
+        original_url = str(result.get("url") or "")
+        resolved_url = decoded_urls.get(original_url)
+        if resolved_url:
+            result["url"] = resolved_url
+            result["canonical_url"] = news._canonical_url(resolved_url)
+        if _is_trusted_news_article(result):
+            trusted.append(result)
+    return trusted
 
 
 def _is_trusted_news_article(article: dict) -> bool:
@@ -925,8 +1074,15 @@ def _research_article_header(sources: list[dict]) -> str:
     )
 
 
-def _append_research_source_references(reply: str, sources: list[dict]) -> str:
-    reply = ai.append_source_references(reply, sources)
+def _append_research_source_references(
+    reply: str,
+    sources: list[dict],
+    *,
+    include_all_sources: bool = False,
+) -> str:
+    reply = ai.append_source_references(
+        reply, sources, include_all_sources=include_all_sources
+    )
     for index, source in enumerate(sources, 1):
         published = _article_date(source)
         details = (
@@ -942,11 +1098,12 @@ def _append_research_source_references(reply: str, sources: list[dict]) -> str:
 
 
 def _research_context(messages: list[dict], mode: str) -> dict:
-    news.ensure_stored_cache_loaded()
     prompt = messages[-1]["content"]
+    source_count = ask_story_research.requested_source_count(prompt)
     previous = _previous_research_context(messages)
     selected_number = _numbered_reference(prompt)
     if selected_number and selected_number <= len(previous.get("trends", [])):
+        news.ensure_stored_cache_loaded()
         selected_id = previous["trends"][selected_number - 1]
         article = next(
             (
@@ -957,7 +1114,10 @@ def _research_context(messages: list[dict], mode: str) -> dict:
         )
         if article and _is_trusted_news_article(article):
             query = f"{article.get('title', '')} {article.get('summary', '')}"
-            related = _retrieve(query, exclude_id=selected_id, limit=9)
+            related = (
+                _retrieve(query, exclude_id=selected_id, limit=source_count - 1)
+                if source_count > 1 else []
+            )
             sources = [article, *related]
             return {
                 "sources": sources,
@@ -971,6 +1131,7 @@ def _research_context(messages: list[dict], mode: str) -> dict:
 
     trend = bool(_TREND_REQUEST.search(prompt))
     if trend:
+        news.ensure_stored_cache_loaded()
         requested = re.search(r"\btop\s+(\d{1,2})\b", prompt, re.I)
         requested_count = min(10, max(1, int(requested.group(1)))) if requested else 5
         topic = _research_topic(prompt)
@@ -1070,16 +1231,25 @@ def _research_context(messages: list[dict], mode: str) -> dict:
             "selected_article": None,
         }
 
-    query = _research_query(prompt)
-    if _CONTEXTUAL_FOLLOWUP.search(prompt):
-        context_text = " ".join(
-            message["content"]
-            for message in messages[-6:-1]
-            if message.get("role") in {"user", "assistant"}
+    query = _chat_retrieval_query(messages)
+    query_tokens = set(intelligence._tokens(query))
+    live_search_failed = False
+    sources = []
+    if query_tokens and not query_tokens.issubset(_NON_RESEARCH_CHAT):
+        stored_sources = _rank_chat_sources(
+            query, _retrieve(query, limit=20), limit=source_count
         )
-        query = _research_query(f"{context_text} {prompt}")
-    sources = _retrieve(query, limit=10)
-    if not sources and previous.get("sources"):
+        sources = stored_sources
+        if _LIVE_RESEARCH_REQUEST.search(prompt):
+            discovery = news.search_discovery(
+                query, scope="all", period="all", sort="relevance", limit=20,
+            )
+            live_search_failed = bool(discovery.get("source_errors"))
+            discovered = _trusted_search_articles(discovery.get("articles") or [])
+            sources = _rank_chat_sources(
+                query, [*discovered, *stored_sources], limit=source_count
+            )
+    if not sources and previous.get("sources") and _is_contextual_followup(prompt):
         articles_by_id = {
             str(article.get("id")): article
             for article in _retrieve("", limit=1000)
@@ -1088,7 +1258,7 @@ def _research_context(messages: list[dict], mode: str) -> dict:
             articles_by_id[article_id]
             for article_id in previous["sources"]
             if article_id in articles_by_id
-        ][:10]
+        ][:source_count]
     return {
         "sources": sources,
         "source_ids": [str(article["id"]) for article in sources],
@@ -1098,6 +1268,8 @@ def _research_context(messages: list[dict], mode: str) -> dict:
         "prefix": "",
         "insufficient": None,
         "selected_article": None,
+        "live_search_failed": live_search_failed,
+        "include_all_sources": bool(_SOURCE_LIST_REQUEST.search(prompt)),
     }
 
 
@@ -1318,10 +1490,10 @@ async def _current_youtube_stream(client: httpx.AsyncClient, channel: dict) -> d
 @app.get("/api/live")
 async def live_channels():
     channels = [
-        {"category": "Philippine National Live Coverage", "categories": ["National Broadcasters"], "description": "Philippine news broadcaster.", "tags": ["ABS-CBN News"], "title": "ABS-CBN News Live", "publisher": "ABS-CBN News", "url": "", "source_url": "https://www.youtube.com/@ABS-CBNNews/live"},
-        {"category": "Philippine National Live Coverage", "categories": ["National Broadcasters"], "description": "Philippine news broadcaster.", "tags": ["GMA News"], "title": "GMA News Live", "publisher": "GMA News", "url": "", "source_url": "https://www.youtube.com/@gmanews/live"},
-        {"category": "Philippine National Live Coverage", "categories": ["National Broadcasters"], "description": "Philippine cable news broadcaster.", "tags": ["ANC", "Philippines"], "title": "ANC 24/7 Live", "publisher": "ANC", "url": "", "source_url": "https://www.youtube.com/@ANCALERTS/live"},
-        {"category": "Philippine National Live Coverage", "categories": ["Government & Official Channels"], "description": "Official Philippine government broadcaster.", "tags": ["People's Television", "Philippines"], "title": "PTV Live", "publisher": "People's Television", "url": "", "source_url": "https://www.youtube.com/PTVphilippines/live"},
+        {"category": "Philippine National Live Coverage", "categories": ["National Broadcasters", "Television News Broadcasters"], "description": "Philippine news broadcaster.", "tags": ["ABS-CBN News"], "title": "ABS-CBN News Live", "publisher": "ABS-CBN News", "url": "", "source_url": "https://www.youtube.com/@ABS-CBNNews/live"},
+        {"category": "Philippine National Live Coverage", "categories": ["National Broadcasters", "Television News Broadcasters"], "description": "Philippine news broadcaster.", "tags": ["GMA News"], "title": "GMA News Live", "publisher": "GMA News", "url": "", "source_url": "https://www.youtube.com/@gmanews/live"},
+        {"category": "Philippine National Live Coverage", "categories": ["National Broadcasters", "Television News Broadcasters"], "description": "Philippine cable news broadcaster.", "tags": ["ANC", "Philippines"], "title": "ANC 24/7 Live", "publisher": "ANC", "url": "", "source_url": "https://www.youtube.com/@ANCALERTS/live"},
+        {"category": "Philippine National Live Coverage", "categories": ["Government & Official Channels", "Television News Broadcasters"], "description": "Official Philippine government broadcaster.", "tags": ["People's Television", "Philippines"], "title": "PTV Live", "publisher": "People's Television", "url": "", "source_url": "https://www.youtube.com/PTVphilippines/live"},
         {"category": "Government and Official Public Briefings", "categories": ["Government & Official Channels"], "description": "Official broadcast service for the Office of the President of the Philippines.", "tags": ["RTVM", "Philippines", "public briefings"], "title": "RTVM Live", "publisher": "Radio Television Malacañang", "url": "", "source_url": "https://www.youtube.com/@RTVMalacanang/live"},
         {"category": "Government and Official Public Briefings", "categories": ["Government & Official Channels"], "description": "Official publication of the Government of the Philippines.", "tags": ["Official Gazette", "Philippines"], "title": "Official Gazette", "publisher": "Philippines Official Gazette", "url": ""},
         {"category": "International Live Coverage", "categories": ["International Broadcasters"], "description": "International public-service news broadcaster.", "tags": ["BBC News", "international news"], "title": "BBC News Live", "publisher": "BBC News", "url": "", "source_url": "https://www.youtube.com/@BBCNews/live"},
@@ -1343,10 +1515,11 @@ async def live_channels():
             stream["tags"] = list(dict.fromkeys([*channel.get("tags", []), *stream_tags]))
             channel.update(stream)
         channel["live_page_url"] = channel.pop("source_url", "")
+    channels.extend(radio_live_channels())
 
     return {
         "channels": channels,
-        "notice": "Active broadcasts link directly to their verified video. Other links open the broadcaster’s official live page; scheduled or recorded broadcasts are not marked LIVE.",
+        "notice": "A channel is marked LIVE only after its current stream is verified. Verified official live pages are linked when available; radio stations without a verified stream or live page are shown as unavailable.",
     }
 
 
@@ -1361,17 +1534,29 @@ async def podcasts(
         "The Daily New York Times",
         "ABS-CBN News podcast",
         "GMA News podcast",
+        "DZRH news podcast",
+        "GMA Super Radyo DZBB podcast",
+        "RMN Philippines news podcast",
+        "Bombo Radyo Philippines news podcast",
+        "Aksyon Radyo Philippines news podcast",
+        "Brigada News FM podcast",
+        "Radyo Pilipinas podcast",
+        "Radyo5 True FM podcast",
+        "Radyo Veritas podcast",
+        "Philippine regional news podcast",
+        "Philippine campus journalism podcast",
     ]
     episodes: list[dict] = []
     async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-        unresolved_collections = set()
-        for term in terms:
+        async def search_term(term: str) -> tuple[list[dict], set[str]]:
             try:
                 response = await client.get(
                     "https://itunes.apple.com/search",
                     params={"term": term, "media": "podcast", "entity": "podcastEpisode", "limit": 2},
                 )
                 response.raise_for_status()
+                term_episodes = []
+                unresolved = set()
                 for item in response.json().get("results", []):
                     episode_url = item.get("trackViewUrl") or ""
                     if not item.get("trackId") or not episode_url:
@@ -1386,8 +1571,8 @@ async def podcasts(
                     collection_id = str(item.get("collectionId") or "")
                     show = item.get("collectionName") or ""
                     if collection_id and (not publisher or publisher.casefold() == show.casefold()):
-                        unresolved_collections.add(collection_id)
-                    episodes.append({
+                        unresolved.add(collection_id)
+                    episode = {
                         "id": str(item.get("trackId") or item.get("collectionId") or len(episodes)),
                         "title": item.get("trackName") or item.get("collectionName") or "Untitled episode",
                         "publisher": publisher,
@@ -1400,16 +1585,37 @@ async def podcasts(
                         "published": item.get("releaseDate"),
                         "image": item.get("artworkUrl600") or item.get("artworkUrl100"),
                         "url": episode_url,
-                    })
-            except Exception:
-                logger.warning("Could not load podcast search for %s", term)
+                    }
+                    media = classify_publisher(f"{publisher} {show}")
+                    if media:
+                        episode["media"] = media
+                        episode["categories"] = media["categories"]
+                    term_episodes.append(episode)
+                return term_episodes, unresolved
+            except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+                logger.warning("Could not load podcast search for %s: %s", term, exc)
+                return [], set()
+
+        search_results = []
+        for start in range(0, len(terms), 5):
+            search_results.extend(await asyncio.gather(
+                *(search_term(term) for term in terms[start:start + 5])
+            ))
+        for term_episodes, unresolved in search_results:
+            episodes.extend(term_episodes)
+        unresolved_collections = set().union(
+            *(unresolved for _, unresolved in search_results)
+        )
+
+        publisher_lookup_limit = asyncio.Semaphore(5)
 
         async def lookup_publisher(collection_id: str) -> tuple[str, str]:
             try:
-                response = await client.get(
-                    "https://itunes.apple.com/lookup",
-                    params={"id": collection_id},
-                )
+                async with publisher_lookup_limit:
+                    response = await client.get(
+                        "https://itunes.apple.com/lookup",
+                        params={"id": collection_id},
+                    )
                 response.raise_for_status()
                 results = response.json().get("results") or []
                 publisher = next(
@@ -1441,6 +1647,10 @@ async def podcasts(
                     episode["show"]
                     or "Publisher not listed"
                 )
+            media = classify_publisher(f'{episode["publisher"]} {episode["show"]}')
+            if media:
+                episode["media"] = media
+            episode["categories"] = podcast_categories(episode)
             episode.pop("collection_id", None)
 
     unique = []
@@ -1553,10 +1763,23 @@ def search_articles(
     q: str = Query(min_length=2),
     section: str | None = None,
     topic: str | None = None,
+    scope: str = "all",
+    period: str = "all",
+    from_date: date | None = None,
+    to_date: date | None = None,
+    sort: str = "relevance",
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=100000),
     uid: str | None = Depends(optional_user),
 ):
+    if scope not in {"all", "philippines", "international"}:
+        raise HTTPException(422, "Unsupported news coverage filter.")
+    if period not in {"all", "latest", "historical"}:
+        raise HTTPException(422, "Unsupported news time-period filter.")
+    if sort not in {"relevance", "newest", "oldest"}:
+        raise HTTPException(422, "Unsupported news sort order.")
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(422, "The start date must be on or before the end date.")
     if uid and sb is not None:
         def record_search() -> None:
             try:
@@ -1566,24 +1789,19 @@ def search_articles(
             except Exception:
                 logger.exception("Could not save search history")
         threading.Thread(target=record_search, name="mira-search-history", daemon=True).start()
-    total = news.count_articles(section, topic)
-    articles = news.list_articles(section, None, topic, limit=total)
-    results, corrected_query = intelligence.fast_search(
-        q, articles, limit=offset + limit + 1
+    return _intelligence_call(
+        news.search_discovery,
+        q,
+        section=section,
+        scope=scope,
+        topic=topic,
+        period=period,
+        from_date=from_date,
+        to_date=to_date,
+        sort=sort,
+        limit=limit,
+        offset=offset,
     )
-    if section == "trending":
-        priority = {"local": 0, "regional": 1, "national": 2, "international": 3}
-        results.sort(key=lambda article: article.get("published") or "", reverse=True)
-        results.sort(key=lambda article: priority.get(article.get("section"), 4))
-    has_more = len(results) > offset + limit
-    return {
-        "articles": results[offset:offset + limit],
-        "total": total,
-        "next_offset": offset + limit if has_more else None,
-        "mode": "bm25+typo-correction",
-        "corrected_query": corrected_query,
-        "corpus_size": len(articles),
-    }
 
 
 @app.get("/api/topics")
@@ -1864,7 +2082,11 @@ def chat(
             model_reply,
         ) if part
     )
-    reply = _append_research_source_references(response_text, sources)
+    reply = _append_research_source_references(
+        response_text,
+        sources,
+        include_all_sources=bool(research.get("include_all_sources")),
+    )
     reply = _with_research_context(
         reply, research["source_ids"], research["trend_ids"]
     )
@@ -1939,7 +2161,11 @@ async def chat_upload(
     _ai_call(ai._need_client, task)
     user_context = _upload_retrieval_context(msgs)
     query = _upload_retrieval_query(user_context, attachments)
-    sources = _retrieve(query, limit=5, strict_image_relevance=has_images)
+    sources = _retrieve(
+        query,
+        limit=ask_story_research.requested_source_count(msgs[-1]["content"]),
+        strict_image_relevance=has_images,
+    )
     system = _chat_system(mode, sources) + "\n\n" + _ai_language_instruction(uid)
     if has_images:
         system += (
@@ -1976,13 +2202,14 @@ def ask(
     uid: str | None = Depends(optional_user),
     stream: bool = False,
 ):
-    a = news.get_article(body.article_id)
+    a = news.get_article(body.article_id, enrich_image=False)
     if not a:
         raise HTTPException(404, "Article not found")
     msgs = [m.model_dump() for m in body.messages][-20:]
     if not msgs:
         raise HTTPException(422, "At least one message is required.")
     query = msgs[-1]["content"] if msgs else a.get("title", "")
+    source_count = ask_story_research.requested_source_count(query)
     mode = _requested_chat_mode(body.mode, query)
     task = "article_generation" if mode == "article_generation" else "story_chat"
     task = ask_story.classify_task(query) if task == "story_chat" else task
@@ -1991,21 +2218,31 @@ def ask(
     related_articles = _retrieve(
         retrieval_query,
         exclude_id=body.article_id,
-        limit=12 if deep_research else 4,
+        limit=source_count,
     )
     research_disclosure = None
     if deep_research:
         sources, research_disclosure = ask_story_research.research_sources(
-            a, query, related_articles
+            a, query, related_articles, limit=source_count
         )
     else:
-        sources = related_articles
+        sources = ask_story_research.related_sources(
+            a, query, related_articles, limit=source_count
+        )
+    article_text_is_summary = not deep_research
+    article_context = (
+        a.get("summary") or ""
+        if article_text_is_summary
+        else news.article_text(a)
+    )
     system = ask_story.story_system(
         a,
-        news.article_text(a),
+        article_context,
         sources,
         research_disclosure=research_disclosure,
         deep_research=deep_research,
+        source_count=source_count,
+        article_text_is_summary=article_text_is_summary,
     )
     system += "\n\n" + _ai_language_instruction(uid)
     if stream:
@@ -2022,7 +2259,6 @@ def ask(
                     yield event({"type": "token", "text": chunk})
                 reply = ask_story.append_sources(
                     "".join(response_parts),
-                    a,
                     sources,
                     include_all_sources=deep_research,
                 )
@@ -2050,7 +2286,7 @@ def ask(
     except ask_story.AskStoryFailure as exc:
         raise HTTPException(503, str(exc)) from exc
     reply = ask_story.append_sources(
-        reply, a, sources, include_all_sources=deep_research
+        reply, sources, include_all_sources=deep_research
     )
     conv = _save_story_turn(
         uid, body.conversation_id, a, msgs[-1]["content"], reply

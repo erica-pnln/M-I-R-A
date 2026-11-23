@@ -280,9 +280,14 @@ def _messages(messages: list[dict], system: str) -> list[dict]:
 
 def _request(spec: AskStoryModel, messages: list[dict], system: str,
              task: str, stream: bool = False) -> dict:
+    default_max_tokens = (
+        1800 if task == "article_generation"
+        else 512 if task in ("story_chat", "story_explanation", "news_summarization")
+        else 900
+    )
     max_tokens = int(os.getenv(
         "ASK_STORY_ARTICLE_MAX_TOKENS",
-        "1800" if task == "article_generation" else "900",
+        str(default_max_tokens),
     ))
     body = {
         "model": spec.model,
@@ -373,12 +378,15 @@ def story_system(
     *,
     research_disclosure: str | None = None,
     deep_research: bool = False,
+    source_count: int = 4,
+    article_text_is_summary: bool = False,
 ) -> str:
     publication = article.get("published") or article.get("date") or "publication date unavailable"
     lines = [
         "You are Ask Story, MIRA's dedicated news research and journalism assistant.",
         "Understand and honor the user's exact question, focus, article type, and requested audience.",
-        "Use the selected article as the anchor, and use only the selected article and clearly labeled supporting sources as evidence.",
+        "Use the selected article only as context and use clearly labeled, directly relevant supporting sources as additional evidence.",
+        "Never count or list the selected article or its publisher as a supporting source. Count only distinct, relevant external sources toward any requested total; if fewer are available, state the actual count and never pad the list with unrelated stories.",
         "Never invent facts, quotations, statistics, people, organizations, locations, or source links.",
         "Distinguish verified reporting, allegations, opinions, source claims, and your own analysis.",
         "Attribute direct quotations only when the source provides those exact words; never fabricate quotes.",
@@ -392,8 +400,14 @@ def story_system(
         f"Publication: {article.get('source', '')}",
         f"Publication date: {publication}",
         f"Original URL: {article.get('url', '')}",
-        f"Article text:\n{text or 'Unavailable'}",
+        f"{'Cached article summary' if article_text_is_summary else 'Article text'}:\n"
+        f"{text or 'Unavailable'}",
     ]
+    if article_text_is_summary:
+        lines.append(
+            "The supplied article content is only its cached summary, not the full article. "
+            "Do not infer missing details; disclose when the summary is insufficient."
+        )
     if sources:
         lines.extend(["", "RETRIEVED SUPPORTING SOURCES"])
         for index, source in enumerate(sources, 1):
@@ -413,7 +427,8 @@ def story_system(
             "DEEP-RESEARCH AND ARTICLE REQUIREMENTS",
             "Prioritize the user's specific focus. Cross-check source claims, dates, people, impacts, responses, and competing accounts.",
             "Do not infer causes, responsibility, statistics, or quotations unless retrieved evidence supports them.",
-            "If five distinct trusted publication domains were not retrieved, clearly disclose that limitation and do not claim five-source research.",
+            f"If {source_count} distinct trusted, relevant supporting sources were not retrieved, "
+            f"clearly disclose that limitation and do not claim {source_count}-source research.",
             "For a requested full article, provide a detailed, professionally structured article: factual headline and lead, relevant background, evidence-supported developments and perspectives, effects and responses, and what remains unknown.",
             "Use substantial, useful depth for a full article rather than returning a short summary. Do not force unsupported or irrelevant sections.",
             "Cite factual claims in the body and finish with a Sources and References section using only the supplied source IDs and URLs.",
@@ -423,7 +438,6 @@ def story_system(
 
 def append_sources(
     reply: str,
-    article: dict,
     sources: list[dict],
     *,
     include_all_sources: bool = False,
@@ -432,10 +446,6 @@ def append_sources(
     references = []
     if "[ARTICLE]" in reply:
         reply = reply.replace("[ARTICLE]", "")
-        references.append(
-            f"- [ARTICLE] [Read selected article: {article.get('title', '')} — "
-            f"{article.get('source', '')}]({article.get('url', '')})"
-        )
     cited = set(
         int(value) for value in re.findall(r"\[S(\d+)\]", reply)
     )

@@ -9,7 +9,7 @@ import time
 from io import BytesIO
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
@@ -18,9 +18,12 @@ import feedparser
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from . import intelligence
 from .db import sb
 from .feeds import FEEDS, INTEREST_KEYWORDS, NEWS_TOPIC_RULES
-from .intelligence import content_recommendations, fast_search
+from .intelligence import content_recommendations, fast_search, hybrid_search
+from .media_sources import classify_news_source, media_search_text
+from .search_intelligence import query_with_dates, understand_query
 
 TTL = 600  # fallback refresh interval
 _DEFAULT_REFRESH_INTERVALS = {
@@ -42,6 +45,7 @@ _stored_load_lock = threading.Lock()
 _refresh_state_lock = threading.Lock()
 _image_state_lock = threading.Lock()
 _image_enrichment_lock = threading.Lock()
+_image_enrichment_pending: dict[str, tuple[dict, bool]] = {}
 _image_enrichment_running = False
 _refreshing = False
 _last_attempt_by_section: dict[str, float] = {}
@@ -52,6 +56,9 @@ _GOOGLE_IMAGE_SIGNATURE = re.compile(r'data-n-a-sg="([^"]+)"')
 _GOOGLE_IMAGE_TIMESTAMP = re.compile(r'data-n-a-ts="([^"]+)"')
 _TRACKING_PARAMS = {"fbclid", "gclid", "mc_cid", "mc_eid", "ocid"}
 logger = logging.getLogger(__name__)
+_SEARCH_CACHE_TTL = 300
+_search_cache: dict[tuple, tuple[float, list[dict], list[dict]]] = {}
+_search_cache_lock = threading.Lock()
 _GENERIC_IMAGE_REUSE_LIMIT = 10
 _IMAGE_ENRICHMENT_BATCH_SIZE = 200
 _IMAGE_HOST_SUFFIXES = (
@@ -71,6 +78,7 @@ _IMAGE_HOST_SUFFIXES = (
     "france24.com",
     "foxweather.com",
     "gmanews.tv",
+    "googleusercontent.com",
     "guim.co.uk",
     "immigration.gov.ph",
     "inquirer.net",
@@ -482,12 +490,7 @@ def _image(entry: dict, article_url: str | None = None) -> str | None:
     return None
 
 
-def _page_image(article: dict) -> str | None:
-    article_url = article["url"]
-    if _google_article_id(article_url):
-        article_url = _decode_google_news_urls([article_url]).get(article_url)
-        if not article_url:
-            return None
+def _article_page_image(article_url: str) -> str | None:
     try:
         response = httpx.get(
             article_url, timeout=8, follow_redirects=True,
@@ -511,7 +514,18 @@ def _page_image(article: dict) -> str | None:
     return _parsed_image(parser, str(response.url))
 
 
-def _enrich_missing_images(items: list[dict]) -> None:
+def _page_image(article: dict) -> str | None:
+    article_url = article["url"]
+    image = _article_page_image(article_url)
+    if image or not _google_article_id(article_url):
+        return image
+    decoded_url = _decode_google_news_urls([article_url]).get(article_url)
+    return _article_page_image(decoded_url) if decoded_url else None
+
+
+def _enrich_missing_images(
+    items: list[dict], *, resolve_google_urls: bool = True
+) -> None:
     images_by_url = {}
     for article in items:
         image = article.get("image") or article.get("image_url")
@@ -539,8 +553,10 @@ def _enrich_missing_images(items: list[dict]) -> None:
         if not candidates:
             return
 
-        decoded_urls = _decode_google_news_urls(
-            [article["url"] for article in candidates]
+        decoded_urls = (
+            _decode_google_news_urls([article["url"] for article in candidates])
+            if resolve_google_urls
+            else {}
         )
         found = []
         to_fetch = []
@@ -600,22 +616,44 @@ def _enrich_missing_images(items: list[dict]) -> None:
                         logger.exception("Could not save article image metadata to Supabase")
 
 
-def _schedule_image_enrichment() -> None:
+def _schedule_image_enrichment(
+    items: list[dict] | None = None, *, resolve_google_urls: bool = True
+) -> None:
     global _image_enrichment_running
+    requested_items = _cache["items"] if items is None else items
     with _image_enrichment_lock:
-        if _image_enrichment_running:
+        for article in requested_items:
+            if article.get("image") or not article.get("url"):
+                continue
+            key = str(article.get("id") or article["url"])
+            _image_enrichment_pending[key] = (article, resolve_google_urls)
+        if _image_enrichment_running or not _image_enrichment_pending:
             return
         _image_enrichment_running = True
 
     def enrich() -> None:
         global _image_enrichment_running
-        try:
-            _enrich_missing_images(_cache["items"])
-        except Exception:
-            logger.exception("Background article image enrichment failed")
-        finally:
+        while True:
             with _image_enrichment_lock:
-                _image_enrichment_running = False
+                pending = list(_image_enrichment_pending.values())
+                _image_enrichment_pending.clear()
+                if not pending:
+                    _image_enrichment_running = False
+                    return
+            for should_resolve_google_urls in (True, False):
+                batch = [
+                    article for article, resolve_urls in pending
+                    if resolve_urls is should_resolve_google_urls
+                ]
+                if not batch:
+                    continue
+                try:
+                    if should_resolve_google_urls:
+                        _enrich_missing_images(batch)
+                    else:
+                        _enrich_missing_images(batch, resolve_google_urls=False)
+                except Exception:
+                    logger.exception("Background article image enrichment failed")
 
     threading.Thread(target=enrich, name="mira-image-enrichment", daemon=True).start()
 
@@ -626,7 +664,7 @@ def is_image_enrichment_running() -> bool:
 
 
 async def _pull(client: httpx.AsyncClient, feed: dict) -> tuple[list[dict], str | None]:
-    retries = min(3, max(0, int(os.getenv("NEWS_REQUEST_RETRIES", "2"))))
+    retries = min(3, max(0, int(feed.get("retries", os.getenv("NEWS_REQUEST_RETRIES", "2")))))
     backoff_seconds = max(0.0, float(os.getenv("NEWS_RETRY_BACKOFF_SECONDS", "0.5")))
     parsed = None
     for attempt in range(retries + 1):
@@ -644,7 +682,7 @@ async def _pull(client: httpx.AsyncClient, feed: dict) -> tuple[list[dict], str 
         logger.warning("News feed %s returned no entries", feed["source"])
         return [], "Feed returned no entries"
     items = []
-    for e in parsed.entries[:15]:
+    for e in parsed.entries[:feed.get("max_items", 15)]:
         url = e.get("link")
         canonical_url = _canonical_url(url) if url else None
         if not canonical_url:
@@ -669,6 +707,7 @@ async def _pull(client: httpx.AsyncClient, feed: dict) -> tuple[list[dict], str 
             "category": category or feed["section"],
             "image_url": _image(e, url),
             "published": time.strftime("%Y-%m-%dT%H:%M:%SZ", ts) if ts else None,
+            "author": _clean(e.get("author")) or None,
         })
     if not items:
         logger.warning("News feed %s had no usable article links", feed["source"])
@@ -677,7 +716,11 @@ async def _pull(client: httpx.AsyncClient, feed: dict) -> tuple[list[dict], str 
 
 
 async def _pull_feeds(feeds: list[dict]) -> list[tuple[list[dict], str | None]]:
-    timeout = max(1.0, float(os.getenv("NEWS_REQUEST_TIMEOUT_SECONDS", "10")))
+    default_timeout = max(1.0, float(os.getenv("NEWS_REQUEST_TIMEOUT_SECONDS", "10")))
+    timeout = min(
+        (max(1.0, float(feed.get("timeout_seconds", default_timeout))) for feed in feeds),
+        default=default_timeout,
+    )
     limits = httpx.Limits(max_connections=8, max_keepalive_connections=8)
     async with httpx.AsyncClient(
         timeout=timeout,
@@ -702,7 +745,7 @@ async def _pull_feeds(feeds: list[dict]) -> list[tuple[list[dict], str | None]]:
 def _public_article(article: dict) -> dict:
     summary = _clean(article.get("summary") or "")
     title = article.get("title") or ""
-    return {
+    public_article = {
         "id": article["id"],
         "title": title,
         "summary": summary,
@@ -714,7 +757,12 @@ def _public_article(article: dict) -> dict:
         "image": article.get("image_url") or article.get("image"),
         "published": article.get("published"),
         "collected_at": article.get("collected_at"),
+        "author": article.get("author"),
     }
+    media = classify_news_source(article.get("source"))
+    if media:
+        public_article["media"] = media
+    return public_article
 
 
 def _normalized_topic_text(text: str) -> str:
@@ -810,6 +858,24 @@ def _classify_article_topics(title: str, summary: str) -> list[str]:
 
 
 def _article_matches_topic(article: dict, topic: str) -> bool:
+    media = article.get("media") or classify_news_source(article.get("source"))
+    if media:
+        media_values = {
+            str(value).casefold()
+            for value in [
+                media.get("publisher"),
+                media.get("network"),
+                media.get("language"),
+                media.get("region"),
+                media.get("province"),
+                media.get("city"),
+                *(media.get("categories") or []),
+            ]
+            if value
+        }
+        if topic.casefold() in media_values:
+            return True
+
     category = next((label for label in NEWS_TOPIC_RULES if label.casefold() == topic.casefold()), None)
     if category:
         topics = article.get("topics")
@@ -1060,9 +1126,9 @@ def refresh_status() -> dict:
     }
 
 
-def _load_stored_once() -> None:
+def _load_stored_once(force: bool = False) -> None:
     with _stored_load_lock:
-        if _cache["items"] or sb is None or _cache["stored_loaded"]:
+        if (_cache["items"] and not force) or sb is None or _cache["stored_loaded"]:
             return
         stored = _load_stored_articles()
         _cache["stored_loaded"] = True
@@ -1088,7 +1154,18 @@ def _load_stored_once() -> None:
                 _cache["last_successful_sync"] = max(
                     _cache["last_successful_sync_by_section"].values()
                 )
-            _publish(stored, at=0.0)
+            if force and _cache["items"]:
+                by_url = {
+                    _canonical_url(article.get("url") or "") or article.get("url"): article
+                    for article in stored
+                }
+                by_url.update({
+                    _canonical_url(article.get("url") or "") or article.get("url"): article
+                    for article in _cache["items"]
+                })
+                _publish(list(by_url.values()), at=0.0)
+            else:
+                _publish(stored, at=0.0)
             _schedule_image_enrichment()
 
 
@@ -1123,7 +1200,14 @@ def list_articles(
     if topic:
         items = [article for article in items if _article_matches_topic(article, topic)]
     if q:
-        items, _ = fast_search(q, items, limit=limit + offset)
+        searchable_items = []
+        for article in items:
+            media = article.get("media") or classify_news_source(article.get("source")) or {}
+            searchable_items.append({**article, "search_metadata": media_search_text(media)})
+        items, _ = fast_search(q, searchable_items, limit=limit + offset)
+        for article in items:
+            article.pop("search_metadata", None)
+            article.pop("text", None)
     elif interests or history or favorites:
         items = content_recommendations(
             items, interests, limit=max(limit + offset, 40),
@@ -1141,7 +1225,248 @@ def count_articles(section: str | None = None, topic: str | None = None) -> int:
     return len(items)
 
 
-def get_article(article_id: str) -> dict | None:
+def search_discovery(
+    query: str,
+    *,
+    section: str | None = None,
+    scope: str = "all",
+    topic: str | None = None,
+    period: str = "all",
+    from_date: date | None = None,
+    to_date: date | None = None,
+    sort: str = "relevance",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """Search the saved archive and query a public news RSS search independently of Trending."""
+    if period not in {"all", "latest", "historical"}:
+        raise ValueError(f"Unsupported news period: {period}")
+    if scope not in {"all", "philippines", "international"}:
+        raise ValueError(f"Unsupported news scope: {scope}")
+    if sort not in {"relevance", "newest", "oldest"}:
+        raise ValueError(f"Unsupported news sort: {sort}")
+
+    intent = understand_query(query, from_date=from_date, to_date=to_date)
+    philippines_query = scope == "philippines" or (
+        scope == "all"
+        and bool(re.search(
+            r"\b(?:philippines|philippine|pilipinas|manila|filipino|duterte|eala|"
+            r"caraga|mindanao|luzon|visayas|npa)\b",
+            intent["query"],
+            re.IGNORECASE,
+        ))
+    )
+    rss_query, effective_start, effective_end = query_with_dates(
+        intent["query"],
+        from_date=intent["from_date"],
+        to_date=intent["to_date"],
+        period=period,
+    )
+    cache_key = (
+        rss_query.casefold(), section, scope, topic.casefold() if topic else None,
+        period, effective_start, effective_end,
+    )
+    now = time.monotonic()
+    with _search_cache_lock:
+        cached = _search_cache.get(cache_key)
+        if cached and now - cached[0] < _SEARCH_CACHE_TTL:
+            candidates, source_errors = cached[1], cached[2]
+        else:
+            candidates, source_errors = [], []
+
+    if not cached or now - cached[0] >= _SEARCH_CACHE_TTL:
+        try:
+            _load_stored_once(force=True)
+        except Exception:
+            logger.exception("Could not load the historical news archive before search")
+        candidates = list(_cache["items"])
+        archive_exact_match = False
+        if (
+            candidates
+            and section is None
+            and scope == "all"
+            and topic is None
+            and period == "all"
+            and intent["from_date"] is None
+            and intent["to_date"] is None
+            and sort == "relevance"
+        ):
+            archive_searchable = []
+            for article in candidates:
+                media = article.get("media") or classify_news_source(article.get("source")) or {}
+                archive_searchable.append({
+                    **article,
+                    "search_metadata": media_search_text(media),
+                })
+            _, archive_correction = fast_search(
+                intent["query"], archive_searchable, limit=1
+            )
+            exact_matches = intelligence.exact_term_matches(
+                archive_correction or intent["query"], archive_searchable
+            )
+            if exact_matches:
+                candidates = exact_matches
+                archive_exact_match = True
+
+        feed_section = (
+            section if section in {"local", "regional", "national", "international"}
+            else "national" if philippines_query else "international"
+        )
+        locale = ("en-PH", "PH", "PH:en") if feed_section != "international" else ("en-US", "US", "US:en")
+        query_url = "https://news.google.com/rss/search?" + urlencode({
+            "q": rss_query,
+            "hl": locale[0],
+            "gl": locale[1],
+            "ceid": locale[2],
+        })
+        feed = {
+            "source": "Google News Search",
+            "section": feed_section,
+            "url": query_url,
+            "max_items": 100,
+            "timeout_seconds": 5,
+            "retries": 0,
+        }
+        try:
+            if archive_exact_match:
+                discovered, error = [], None
+            else:
+                results = asyncio.run(_pull_feeds([feed]))
+                discovered, error = results[0]
+            if error:
+                source_errors = [{"source": feed["source"], "error": error}]
+            if discovered:
+                collected_at = datetime.now(timezone.utc).isoformat()
+                existing = _load_existing_articles([
+                    article["canonical_url"] for article in discovered
+                ])
+                for article in discovered:
+                    prior = existing.get(article["canonical_url"], {})
+                    article["id"] = prior.get("id", article["id"])
+                    article["collected_at"] = collected_at
+                    if not article.get("image_url") and prior.get("image_url"):
+                        article["image_url"] = prior["image_url"]
+                if sb is not None:
+                    try:
+                        sb.table("articles").upsert(
+                            discovered, on_conflict="canonical_url"
+                        ).execute()
+                    except Exception:
+                        logger.exception("Could not archive search-discovered news metadata")
+                by_url = {
+                    _canonical_url(article.get("url") or "") or article.get("url"): article
+                    for article in candidates
+                }
+                by_url.update({
+                    article["canonical_url"]: _public_article(article)
+                    for article in discovered
+                })
+                candidates = list(by_url.values())
+                _publish(candidates)
+                _cache["stored_loaded"] = True
+        except Exception as exc:
+            logger.exception("News search source request failed")
+            source_errors = [{"source": feed["source"], "error": str(exc)}]
+            candidates = list(_cache["items"])
+
+        with _search_cache_lock:
+            if len(_search_cache) >= 128:
+                oldest_key = min(_search_cache, key=lambda key: _search_cache[key][0])
+                _search_cache.pop(oldest_key, None)
+            _search_cache[cache_key] = (
+                time.monotonic(),
+                candidates,
+                source_errors,
+            )
+
+    filtered = candidates
+    if section and section not in {"all", "trending"}:
+        filtered = [article for article in filtered if article.get("section") == section]
+    if scope == "philippines":
+        filtered = [
+            article for article in filtered
+            if article.get("section") in {"local", "regional", "national"}
+        ]
+    elif scope == "international":
+        filtered = [article for article in filtered if article.get("section") == "international"]
+    if topic:
+        filtered = [article for article in filtered if _article_matches_topic(article, topic)]
+    if period != "all" or effective_start or effective_end:
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=30)
+        filtered = [
+            article for article in filtered
+            if (published := _article_date(article)) is not None
+            and (effective_start is None or published.date() >= effective_start)
+            and (effective_end is None or published.date() <= effective_end)
+            and (period != "latest" or published.date() >= cutoff)
+            and (period != "historical" or published.date() <= cutoff)
+        ]
+    searchable = []
+    for article in filtered:
+        media = article.get("media") or classify_news_source(article.get("source")) or {}
+        searchable.append({
+            **article,
+            "search_metadata": media_search_text(media),
+        })
+    _, corrected_query = fast_search(
+        intent["query"], searchable, limit=1
+    )
+    ranking_limit = min(len(searchable), max(limit, offset + limit))
+    if sort != "relevance" or philippines_query:
+        ranking_limit = len(searchable)
+    ranked, search_mode = hybrid_search(
+        corrected_query or intent["query"],
+        searchable,
+        limit=ranking_limit,
+        use_vector_store=False,
+    )
+    for article in ranked:
+        article.pop("search_metadata", None)
+        article.pop("text", None)
+    if sort == "newest":
+        ranked.sort(key=lambda article: article.get("published") or "", reverse=True)
+    elif sort == "oldest":
+        ranked.sort(key=lambda article: article.get("published") or "9999", reverse=False)
+    elif philippines_query:
+        priority = {"local": 0, "regional": 1, "national": 2, "international": 3}
+        ranked.sort(key=lambda article: priority.get(article.get("section"), 4))
+    total = len(searchable)
+    page = ranked[offset:offset + limit]
+    missing_images = [
+        _by_id[article["id"]]
+        for article in page
+        if not article.get("image") and article.get("id") in _by_id
+    ]
+    _schedule_image_enrichment(missing_images, resolve_google_urls=False)
+    for article in page:
+        updated_article = _by_id.get(article.get("id"))
+        if updated_article and updated_article.get("image"):
+            article["image"] = updated_article["image"]
+    image_enrichment_running = is_image_enrichment_running()
+    return {
+        "articles": page,
+        "total": total,
+        "next_offset": offset + limit if offset + limit < total else None,
+        "mode": f"archive+live-rss+{search_mode}",
+        "corrected_query": corrected_query,
+        "corpus_size": len(candidates),
+        "source_errors": source_errors,
+        "image_enrichment_running": image_enrichment_running,
+    }
+
+
+def _article_date(article: dict) -> datetime | None:
+    value = article.get("published")
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def get_article(article_id: str, *, enrich_image: bool = True) -> dict | None:
     article = _by_id.get(article_id)
     if article is None:
         if sb is not None:
@@ -1149,7 +1474,12 @@ def get_article(article_id: str) -> dict | None:
                 response = sb.table("articles").select("*").eq(
                     "id", article_id
                 ).maybe_single().execute()
-                if response.data:
+                if response is None:
+                    logger.warning(
+                        "Supabase returned no response for article lookup %s",
+                        article_id,
+                    )
+                elif response.data:
                     article = _public_article(response.data)
                     _by_id[article_id] = article
             except Exception:
@@ -1157,7 +1487,7 @@ def get_article(article_id: str) -> dict | None:
         if article is None:
             start_refresh_background()
             return None
-    if article and not article.get("image"):
+    if enrich_image and article and not article.get("image"):
         url = article.get("url")
         if url:
             with _image_state_lock:

@@ -5,6 +5,10 @@ production use. A publisher homepage is not automatically an RSS endpoint.
 To add PNA, PIA, GMA, ABS-CBN, or Manila Bulletin, confirm their feed URLs first.
 """
 
+from urllib.parse import quote_plus
+
+from .media_sources import RADIO_STATIONS
+
 GN = "https://news.google.com/rss/search?hl=en-PH&gl=PH&ceid=PH:en&q="
 
 FEEDS = [
@@ -22,6 +26,20 @@ FEEDS = [
     {"source": "Deutsche Welle", "section": "international", "url": "https://rss.dw.com/rdf/rss-en-all"},
     {"source": "France 24", "section": "international", "url": "https://www.france24.com/en/rss"},
 ]
+
+_radio_languages = dict.fromkeys(station["language"] for station in RADIO_STATIONS)
+for _language in _radio_languages:
+    _station_names = [
+        station["name"]
+        for station in RADIO_STATIONS
+        if station["language"] == _language
+    ]
+    _query = " OR ".join(f'"{name}"' for name in _station_names)
+    FEEDS.append({
+        "source": f"Google News (Radio - {_language})",
+        "section": "national" if _language in {"Tagalog / Filipino", "English"} else "regional",
+        "url": GN + quote_plus(_query),
+    })
 
 # High-signal terms for the dashboard's fixed news categories. Supporting terms
 # only count when the headline or description also contains a category anchor.

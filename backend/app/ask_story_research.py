@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import feedparser
 import httpx
 
-from . import news
+from . import intelligence, news
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,165 @@ _ARTICLE_TIMEOUT_SECONDS = max(
     2.0, float(os.getenv("ASK_STORY_SOURCE_TIMEOUT_SECONDS", "7"))
 )
 _MAX_SOURCE_BYTES = 3 * 1024 * 1024
+_SOURCE_COUNT_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+_REQUESTED_SOURCE_COUNT = re.compile(
+    r"\b(?:(?:only|up to|at most|no more than)\s+)?"
+    r"(?P<count>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)"
+    r"\s+(?:relevant\s+|trusted\s+)?sources?\b",
+    re.IGNORECASE,
+)
+_RESEARCH_REQUEST_NOISE = {
+    "about", "article", "at", "can", "comprehensive", "create", "detailed",
+    "draft", "explain", "find", "from", "give", "how", "investigate", "least",
+    "many", "more", "need", "needed", "news", "of", "only", "please", "related",
+    "report", "research", "source", "sources", "story", "than", "the", "this",
+    "to", "up", "what", "with", "write",
+    *_SOURCE_COUNT_WORDS,
+}
+_BROAD_TOPIC_TERMS = {
+    "avenue", "bridge", "car", "cars", "city", "commute", "commuting",
+    "congestion", "department", "development", "driving", "expressway",
+    "extension", "highway", "highways", "infrastructure", "lane", "lanes",
+    "motoring", "motorist", "motorists", "public", "road", "roads", "street",
+    "streets", "traffic", "transport", "transportation", "vehicle", "vehicles",
+    "works",
+}
+_TRANSPORT_TOPIC_TERMS = _BROAD_TOPIC_TERMS - {
+    "city", "department", "development", "infrastructure", "public", "works",
+}
+_PHILIPPINE_CONTEXT_TERMS = {
+    "caloocan", "cebu", "davao", "dpwh", "iloilo", "luzon", "manila",
+    "mindanao", "philippine", "philippines", "visayas",
+}
+_PHILIPPINE_PUBLISHER_DOMAINS = {
+    "bworldonline.com", "gmanetwork.com", "inquirer.net", "manilastandard.net",
+    "manilatimes.net", "pna.gov.ph", "pia.gov.ph", "rappler.com",
+}
+_PUBLISHER_NAME_NOISE = {
+    "daily", "media", "network", "news", "online", "philippine", "philippines",
+    "the",
+}
+
+
+def requested_source_count(request: str, default: int = 4) -> int:
+    match = _REQUESTED_SOURCE_COUNT.search(request)
+    if not match:
+        return default
+    value = match.group("count").casefold()
+    count = _SOURCE_COUNT_WORDS.get(value, int(value) if value.isdigit() else default)
+    return min(10, max(1, count))
+
+
+def _relevance_terms(text: str) -> set[str]:
+    return {
+        token for token in intelligence._tokens(text)
+        if token not in _RESEARCH_REQUEST_NOISE and not token.isdigit()
+    }
+
+
+def _publisher_name_tokens(value: str) -> set[str]:
+    return {
+        token for token in intelligence._tokens(value)
+        if token not in _PUBLISHER_NAME_NOISE
+    }
+
+
+def _same_publisher(article: dict, candidate: dict) -> bool:
+    article_domain = _trusted_domain(
+        str(article.get("url") or article.get("canonical_url") or "")
+    )
+    candidate_domain = str(candidate.get("domain") or "")
+    canonical_domains = {
+        "bbc.co.uk": "bbc.com",
+    }
+    if (
+        article_domain
+        and candidate_domain
+        and canonical_domains.get(article_domain, article_domain)
+        == canonical_domains.get(candidate_domain, candidate_domain)
+    ):
+        return True
+
+    article_name = _publisher_name_tokens(str(article.get("source") or ""))
+    candidate_name = _publisher_name_tokens(str(candidate.get("source") or ""))
+    return bool(
+        article_name
+        and candidate_name
+        and (article_name <= candidate_name or candidate_name <= article_name)
+    )
+
+
+def _is_relevant_to_story(article: dict, request: str, candidate: dict) -> bool:
+    story_text = " ".join(
+        str(article.get(key) or "")
+        for key in ("title", "summary")
+    )
+    story_terms = _relevance_terms(f"{story_text} {request}")
+    candidate_terms = _relevance_terms(
+        " ".join(
+            str(candidate.get(key) or "")
+            for key in ("title", "summary")
+        )
+    )
+    if not story_terms or not candidate_terms:
+        return False
+
+    if (story_terms - _BROAD_TOPIC_TERMS) & (candidate_terms - _BROAD_TOPIC_TERMS):
+        return True
+
+    story_is_philippine = bool(
+        story_terms & _PHILIPPINE_CONTEXT_TERMS
+        or _trusted_domain(
+            str(article.get("url") or article.get("canonical_url") or "")
+        ) in _PHILIPPINE_PUBLISHER_DOMAINS
+    )
+    candidate_is_philippine = (
+        str(candidate.get("domain") or "") in _PHILIPPINE_PUBLISHER_DOMAINS
+    )
+    story_topics = story_terms & _TRANSPORT_TOPIC_TERMS
+    candidate_topics = candidate_terms & _TRANSPORT_TOPIC_TERMS
+    return bool(
+        story_is_philippine
+        and candidate_is_philippine
+        and story_topics & candidate_topics
+    )
+
+
+def related_sources(
+    article: dict,
+    request: str,
+    candidates: list[dict],
+    *,
+    limit: int = 4,
+) -> list[dict]:
+    """Keep distinct, relevant publishers other than the selected story's publisher."""
+    filtered = []
+    seen_domains = set()
+    for item in candidates:
+        candidate = _candidate_from_article(item)
+        if (
+            not candidate
+            or candidate["domain"] in seen_domains
+            or _same_publisher(article, candidate)
+            or not _is_relevant_to_story(article, request, candidate)
+        ):
+            continue
+        seen_domains.add(candidate["domain"])
+        filtered.append(item)
+        if len(filtered) >= limit:
+            break
+    return filtered
 
 
 def _trusted_domain(url: str) -> str | None:
@@ -74,6 +233,9 @@ def _search_query(article: dict, request: str) -> str:
         "article", "comprehensive", "create", "detailed", "draft", "explain",
         "generate", "give", "investigate", "news", "please", "report", "story",
         "write", "about", "this", "that", "with", "from", "what", "how",
+        "at", "least", "many", "more", "need", "needed", "only", "related",
+        "source", "sources", "than", "up",
+        *_SOURCE_COUNT_WORDS,
     }
     focus = [
         word for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]{2,}", request)
@@ -225,12 +387,15 @@ def research_sources(
     request: str,
     related_articles: list[dict],
     *,
-    limit: int = 8,
+    limit: int = 4,
 ) -> tuple[list[dict], str]:
     candidates: list[dict] = []
     seen_domains: set[str] = set()
 
-    for item in related_articles:
+    relevant_related = related_sources(
+        article, request, related_articles, limit=limit
+    )
+    for item in relevant_related:
         candidate = _candidate_from_article(item)
         if not candidate or candidate["domain"] in seen_domains:
             continue
@@ -250,7 +415,7 @@ def research_sources(
         }:
             queries.append(query)
 
-    target_domains = min(5, limit)
+    target_domains = limit
     for query in queries:
         if len(seen_domains) >= target_domains:
             break
@@ -260,7 +425,11 @@ def research_sources(
             logger.exception("Unexpected Ask Story research-search failure.")
             live_candidates = []
         for candidate in live_candidates:
-            if candidate["domain"] in seen_domains:
+            if (
+                candidate["domain"] in seen_domains
+                or _same_publisher(article, candidate)
+                or not _is_relevant_to_story(article, request, candidate)
+            ):
                 continue
             seen_domains.add(candidate["domain"])
             candidates.append(candidate)
@@ -300,15 +469,16 @@ def research_sources(
             or candidate["summary"]
         )
 
-    if len(candidates) >= 5:
+    if len(candidates) >= limit:
         disclosure = (
-            f"Research retrieval examined {len(candidates)} distinct trusted "
-            "publication domains. It may not include every perspective."
+            f"Research retrieval found {len(candidates)} distinct trusted, relevant "
+            "supporting sources. The selected story is not counted."
         )
     else:
         disclosure = (
-            f"Research retrieval found only {len(candidates)} distinct trusted "
-            "publication domains (five requested). Disclose this limitation; "
-            "do not claim that five sources were reviewed."
+            f"Research retrieval found only {len(candidates)} distinct trusted, relevant "
+            f"supporting sources ({limit} requested). The selected story and unrelated "
+            "stories are excluded; disclose this limitation and do not claim that "
+            f"{limit} sources were reviewed."
         )
     return candidates, disclosure

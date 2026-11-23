@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { api } from "@/lib/api";
 import { useLanguage } from "@/components/LanguageProvider";
 import {
@@ -11,6 +12,7 @@ import {
   putCachedNews,
 } from "@/lib/newsCache";
 import ArticleCard from "@/components/ArticleCard";
+import ArticleImage from "@/components/ArticleImage";
 
 const FEED_TABS = [
   { id: "all", title: "All" },
@@ -31,6 +33,59 @@ const NEWS_CATEGORIES = [
   "Education",
   "Environment",
   "Entertainment",
+  "Investigative Journalism",
+  "Crime & Safety",
+  "Tagalog / Filipino",
+  "Bisaya / Cebuano",
+  "Waray",
+  "Hiligaynon",
+  "Ilocano",
+  "Bicolano",
+  "Pangasinan",
+  "Chavacano",
+  "English",
+  "Other Philippine Regional Languages",
+  "DZRH",
+  "GMA Super Radyo DZBB",
+  "DWIZ",
+  "Radyo5 True FM",
+  "Radyo Pilipinas",
+  "RMN",
+  "Bombo Radyo",
+  "Aksyon Radyo",
+  "Brigada News FM",
+  "Radyo Veritas",
+  "DWWW",
+  "Radyo Agila",
+  "National Broadcasters",
+  "Regional & Local Broadcasters",
+  "Radio Broadcasters",
+  "Community Radio Stations",
+  "NCR",
+  "Eastern Visayas",
+  "Central Visayas",
+  "Caraga",
+  "Northern Mindanao",
+  "Davao Region",
+  "Soccsksargen",
+  "Zamboanga Peninsula",
+  "Western Visayas",
+  "Ilocos Region",
+  "Bicol Region",
+  "Cordillera Administrative Region",
+];
+
+const SEARCH_CATEGORIES = [
+  "Politics",
+  "Sports",
+  "Business",
+  "Technology",
+  "Entertainment",
+  "Education",
+  "Investigative Journalism",
+  "Agriculture",
+  "Health",
+  "Environment",
   "Crime & Safety",
 ];
 
@@ -131,6 +186,12 @@ export default function Dashboard() {
   const { language, t } = useLanguage();
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
+  const [searchScope, setSearchScope] = useState("all");
+  const [searchPeriod, setSearchPeriod] = useState("all");
+  const [searchCategory, setSearchCategory] = useState("");
+  const [searchSort, setSearchSort] = useState("relevance");
+  const [searchFromDate, setSearchFromDate] = useState("");
+  const [searchToDate, setSearchToDate] = useState("");
   const [activeFeed, setActiveFeed] = useState("all");
   const [activeCategory, setActiveCategory] = useState("");
   const [categoryArticles, setCategoryArticles] = useState([]);
@@ -140,6 +201,8 @@ export default function Dashboard() {
   const [searchInitialized, setSearchInitialized] = useState(false);
   const [dashboard, setDashboard] = useState({ trending: [], recommended: [], latest: [] });
   const [searchResults, setSearchResults] = useState([]);
+  const [searchTotal, setSearchTotal] = useState(0);
+  const [searchSourceErrors, setSearchSourceErrors] = useState([]);
   const [searchSuggestion, setSearchSuggestion] = useState("");
   const [searchNextOffset, setSearchNextOffset] = useState(null);
   const [saved, setSaved] = useState(new Set());
@@ -157,7 +220,7 @@ export default function Dashboard() {
     const params = new URLSearchParams(window.location.search);
     const initialQuery = params.get("q") || "";
     const initialFeed = params.get("feed") || "";
-    if (["trending", "international", "national", "regional", "local", "recommended"].includes(initialFeed)) {
+    if (!initialQuery && ["trending", "international", "national", "regional", "local", "recommended"].includes(initialFeed)) {
       setActiveFeed(initialFeed);
     }
     setQueryInput(initialQuery);
@@ -305,18 +368,58 @@ export default function Dashboard() {
   useEffect(() => {
     if (!searchInitialized || !query) return undefined;
     let cancelled = false;
+    let imageRefreshTimer;
+    let imageRefreshAttempts = 0;
     const params = new URLSearchParams({
       q: query,
       limit: "50",
       offset: "0",
+      scope: searchScope,
+      period: searchPeriod,
+      sort: searchSort,
     });
+    if (searchCategory) params.set("topic", searchCategory);
+    if (searchFromDate) params.set("from_date", searchFromDate);
+    if (searchToDate) params.set("to_date", searchToDate);
     if (activeFeed !== "all" && activeFeed !== "recommended") {
       params.set("section", activeFeed);
     }
-    const cacheKey = `search:${query}:${activeFeed}`;
+    const cacheKey = `search:${query}:${activeFeed}:${searchScope}:${searchPeriod}:${searchCategory}:${searchSort}:${searchFromDate}:${searchToDate}`;
     setLoading(true);
     setSearchNextOffset(null);
     let cachedSearch = null;
+    function refreshSearchImages() {
+      if (cancelled || imageRefreshAttempts >= 12) return;
+      imageRefreshAttempts += 1;
+      api(`/api/search?${params}`)
+        .then((result) => {
+          if (cancelled) return;
+          const articles = result.articles || [];
+          const imagesById = new Map(
+            articles.filter((article) => article.image).map((article) => [article.id, article.image]),
+          );
+          setSearchResults((current) => current.map((article) => {
+            const image = imagesById.get(article.id);
+            return image ? { ...article, image } : article;
+          }));
+          getCachedNews(cacheKey).then((cached) => {
+            if (!cached) return;
+            const cachedArticles = (cached.articles || []).map((article) => {
+              const image = imagesById.get(article.id);
+              return image ? { ...article, image } : article;
+            });
+            return putCachedNews(cacheKey, { ...cached, articles: cachedArticles });
+          }).catch((cacheError) => {
+            console.warn("Could not update cached MIRA search images:", cacheError);
+          });
+          if (result.image_enrichment_running && articles.some((article) => !article.image)) {
+            imageRefreshTimer = setTimeout(refreshSearchImages, 2000);
+          }
+        })
+        .catch((imageError) => {
+          console.warn("Could not refresh MIRA search images:", imageError);
+        });
+    }
     getCachedNews(cacheKey).catch((cacheError) => {
       console.warn("Could not read cached MIRA search results:", cacheError);
       return null;
@@ -324,6 +427,8 @@ export default function Dashboard() {
       cachedSearch = cached;
       if (!cancelled && cached) {
         setSearchResults(cached.articles || []);
+        setSearchTotal(cached.total || 0);
+        setSearchSourceErrors(cached.source_errors || []);
         setSearchSuggestion(cached.corrected_query || "");
         setSearchNextOffset(cached.next_offset);
         setLoading(false);
@@ -339,6 +444,8 @@ export default function Dashboard() {
         if (!result) return;
         if (cancelled) return;
         setSearchResults(result.articles || []);
+        setSearchTotal(result.total || 0);
+        setSearchSourceErrors(result.source_errors || []);
         setSearchSuggestion(result.corrected_query || "");
         setSearchNextOffset(result.next_offset);
         setConnectionIssue(false);
@@ -350,6 +457,9 @@ export default function Dashboard() {
             console.warn("Could not cache a MIRA article:", cacheError);
           });
         }
+        if (result.image_enrichment_running && (result.articles || []).some((article) => !article.image)) {
+          imageRefreshTimer = setTimeout(refreshSearchImages, 2000);
+        }
       })
       .catch((e) => {
         if (!cancelled) {
@@ -360,8 +470,14 @@ export default function Dashboard() {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    return () => { cancelled = true; };
-  }, [query, searchInitialized, activeFeed, online]);
+    return () => {
+      cancelled = true;
+      clearTimeout(imageRefreshTimer);
+    };
+  }, [
+    query, searchInitialized, activeFeed, online, searchScope, searchPeriod,
+    searchCategory, searchSort, searchFromDate, searchToDate,
+  ]);
 
   useEffect(() => {
     const usesFilteredFeed = activeCategory || !["all", "recommended"].includes(activeFeed);
@@ -521,15 +637,23 @@ export default function Dashboard() {
           q: query,
           limit: "50",
           offset: String(searchNextOffset),
+          scope: searchScope,
+          period: searchPeriod,
+          sort: searchSort,
         });
+        if (searchCategory) params.set("topic", searchCategory);
+        if (searchFromDate) params.set("from_date", searchFromDate);
+        if (searchToDate) params.set("to_date", searchToDate);
         if (activeFeed !== "all" && activeFeed !== "recommended") {
           params.set("section", activeFeed);
         }
         const result = await api(`/api/search?${params}`);
         const mergedResults = [...searchResults, ...(result.articles || [])];
         setSearchResults(mergedResults);
+        setSearchTotal(result.total || mergedResults.length);
+        setSearchSourceErrors(result.source_errors || []);
         setSearchNextOffset(result.next_offset);
-        putCachedNews(`search:${query}:${activeFeed}`, {
+        putCachedNews(`search:${query}:${activeFeed}:${searchScope}:${searchPeriod}:${searchCategory}:${searchSort}:${searchFromDate}:${searchToDate}`, {
           ...result,
           articles: mergedResults,
         }).catch((cacheError) => {
@@ -604,15 +728,16 @@ export default function Dashboard() {
     const nextQuery = queryInput.trim();
     setSearchSuggestion("");
     setSearchResults([]);
+    setActiveFeed("all");
     window.history.replaceState(null, "", nextQuery ? `/?q=${encodeURIComponent(nextQuery)}` : "/");
     setQuery(nextQuery);
   }
 
   const feedTabs = dashboard.has_activity
     ? query
-      ? FEED_TABS
+      ? FEED_TABS.filter((tab) => tab.id !== "trending")
       : [...FEED_TABS, { id: "recommended", title: t("recommended") }]
-    : FEED_TABS;
+    : query ? FEED_TABS.filter((tab) => tab.id !== "trending") : FEED_TABS;
   const activeTab = feedTabs.find((tab) => tab.id === activeFeed) || FEED_TABS[0];
   const feedArticles = activeFeed === "trending"
     ? dashboard.trending
@@ -634,35 +759,41 @@ export default function Dashboard() {
     local: t("The latest reports from Caraga and nearby communities."),
     recommended: t("Selected interests, reading history, and saved stories shape these picks."),
   }[activeFeed] || "";
+  const heroArticle = dashboard.trending?.find((article) => article.image)
+    || dashboard.latest?.find((article) => article.image)
+    || dashboard.trending?.[0]
+    || dashboard.latest?.[0]
+    || null;
+  const hotNews = Array.from(
+    new Map([...(dashboard.trending || []), ...(dashboard.latest || [])].map((article) => [article.id, article])).values(),
+  ).slice(0, 10);
 
   return (
     <div className="space-y-7">
-      <section className="newsroom-hero glass" aria-labelledby="newsroom-title">
-        <div className="newsroom-heading">
-          <div className="newsroom-kicker">
-            <span className="newsroom-live-dot" aria-hidden="true" />
-            <span>{t("MIRA Newsroom")}</span>
-            <span className="newsroom-kicker-line" aria-hidden="true" />
-            <span>{t("Live intelligence")}</span>
-          </div>
-          <h1 id="newsroom-title" className="font-display">
-            {t("The stories shaping")} <span>{t("today.")}</span>
-          </h1>
-          <p>{t("Explore verified reports, emerging trends, and regional perspectives.")}</p>
+      <section className="home-hero home-hero-showcase media-discovery-hero newsroom-hero-reuse glass" aria-labelledby="newsroom-title">
+        <div className="home-hero-backdrop" aria-hidden="true">
+          {heroArticle && (
+            <ArticleImage article={heroArticle} className="home-hero-image" priority />
+          )}
         </div>
-
-        <div className="newsroom-tools">
-          <form className="newsroom-search" role="search" onSubmit={search}>
-            <span className="newsroom-search-icon" aria-hidden="true">⌕</span>
+        <div className="home-hero-copy">
+          <p className="label">{t("MIRA Newsroom")}</p>
+          <h1 id="newsroom-title" className="font-display">
+            {heroArticle?.title || t("The stories shaping today.")}
+          </h1>
+        </div>
+        <div className="home-hero-actions">
+          <form className="home-search" role="search" onSubmit={search}>
+            <span aria-hidden="true">⌕</span>
             <input
-              aria-label={t("Search stories, topics, and sources")}
-              placeholder={t("Search stories, topics, sources…")}
+              aria-label={t("Search titles, descriptions, people, locations, categories, or sources")}
+              placeholder={t("Search titles, descriptions, people, locations, categories, or sources")}
               value={queryInput}
               onChange={(event) => setQueryInput(event.target.value)}
+              className="min-w-0 flex-1 bg-transparent outline-none"
             />
             {query && (
               <button
-                className="newsroom-clear"
                 type="button"
                 aria-label={t("Clear")}
                 onClick={() => {
@@ -674,26 +805,17 @@ export default function Dashboard() {
                 ×
               </button>
             )}
-            <button className="newsroom-search-button" type="submit">{t("Search")}</button>
+            <button type="submit" aria-label={t("Search")} className={query ? "newsroom-submit-shift" : ""}>→</button>
           </form>
-          <div className="newsroom-sync" role="status">
-            <span className={`newsroom-sync-state ${online && !connectionIssue ? "is-live" : "is-offline"}`}>
-              {online && !connectionIssue ? t("Feed live") : t("Offline mode")}
-            </span>
-            <span>
-              {!online || connectionIssue
-                ? activeArticles.length
-                  ? t("Showing cached headlines")
-                  : t("No cached headlines available")
-                : usingLocalCache
-                  ? t("Checking for new reports")
-                  : t("Latest reports from MIRA")}
-            </span>
-          </div>
         </div>
       </section>
 
       {error && <p role="alert" className="rounded-xl border border-red-400/30 bg-red-950/30 p-3 text-sm text-red-200">{error}</p>}
+      {query && searchSourceErrors.length > 0 && (
+        <p role="status" className="rounded-xl border border-amber-300/20 bg-amber-950/20 p-3 text-sm text-amber-100/80">
+          {t("Live news search is temporarily unavailable; showing any matching archived reports.")}
+        </p>
+      )}
       {loading && !dashboard.latest.length && !searchResults.length && (
         <p className="animate-pulse rounded-2xl bg-white/[.04] p-5 text-sm text-white/70">{t("Loading cached headlines…")}</p>
       )}
@@ -755,22 +877,105 @@ export default function Dashboard() {
             ))}
           </nav>
           {query ? (
-            <StorySection
-              title={t("Search results for “{query}”", { query: searchSuggestion || query })}
-              description={[
-                searchSuggestion ? `Closest spelling match for “${query}”.` : "",
-                t(activeTab.title),
-              ].filter(Boolean).join("  •  ")}
-              articles={searchResults}
-              saved={saved}
-              onSave={toggleSave}
-              initialCount={50}
-              totalCount={searchResults.length}
-              onLoadMore={searchNextOffset !== null ? loadMore : undefined}
-              loadingMore={loadingMore}
-              empty="No stories match these search filters. Try another keyword or filter."
-              loading={loading}
-            />
+            <>
+              <div className="flex flex-wrap items-end gap-3 rounded-2xl border border-white/10 bg-white/[.03] p-3">
+                <label className="flex min-w-36 flex-1 flex-col gap-1 text-xs text-white/65">
+                  {t("Coverage")}
+                  <select className="rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-white" value={searchScope} onChange={(event) => setSearchScope(event.target.value)}>
+                    <option value="all">{t("All News")}</option>
+                    <option value="philippines">{t("Philippine News")}</option>
+                    <option value="international">{t("International News")}</option>
+                  </select>
+                </label>
+                <label className="flex min-w-32 flex-1 flex-col gap-1 text-xs text-white/65">
+                  {t("Time period")}
+                  <select className="rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-white" value={searchPeriod} onChange={(event) => setSearchPeriod(event.target.value)}>
+                    <option value="all">{t("All News")}</option>
+                    <option value="latest">{t("Latest News")}</option>
+                    <option value="historical">{t("Historical News")}</option>
+                  </select>
+                </label>
+                <label className="flex min-w-36 flex-1 flex-col gap-1 text-xs text-white/65">
+                  {t("Category")}
+                  <select className="rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-white" value={searchCategory} onChange={(event) => setSearchCategory(event.target.value)}>
+                    <option value="">{t("All categories")}</option>
+                    {SEARCH_CATEGORIES.map((category) => (
+                      <option key={category} value={category}>{t(category)}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex min-w-32 flex-1 flex-col gap-1 text-xs text-white/65">
+                  {t("Sort by")}
+                  <select className="rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-white" value={searchSort} onChange={(event) => setSearchSort(event.target.value)}>
+                    <option value="relevance">{t("Relevance")}</option>
+                    <option value="newest">{t("Newest first")}</option>
+                    <option value="oldest">{t("Oldest first")}</option>
+                  </select>
+                </label>
+                <label className="flex min-w-32 flex-col gap-1 text-xs text-white/65">
+                  {t("From")}
+                  <input aria-label={t("From date")} type="date" className="rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-white" value={searchFromDate} onChange={(event) => setSearchFromDate(event.target.value)} />
+                </label>
+                <label className="flex min-w-32 flex-col gap-1 text-xs text-white/65">
+                  {t("To")}
+                  <input aria-label={t("To date")} type="date" className="rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-white" value={searchToDate} onChange={(event) => setSearchToDate(event.target.value)} />
+                </label>
+              </div>
+              <StorySection
+                title={t("Search results for “{query}”", { query: searchSuggestion || query })}
+                description={[
+                  searchSuggestion ? `Closest spelling match for “${query}”.` : "",
+                  t(activeTab.title),
+                ].filter(Boolean).join("  •  ")}
+                articles={searchResults}
+                saved={saved}
+                onSave={toggleSave}
+                initialCount={50}
+                totalCount={searchTotal}
+                onLoadMore={searchNextOffset !== null ? loadMore : undefined}
+                loadingMore={loadingMore}
+                empty="No stories match these search filters. Try another keyword or filter."
+                loading={loading}
+              />
+            </>
+          ) : activeFeed === "all" && !activeCategory ? (
+            <div className="newsroom-dashboard">
+              <section className="newsroom-hot-panel" aria-labelledby="top-hot-news-title">
+                <div className="home-section-heading">
+                  <h2 id="top-hot-news-title"><span aria-hidden="true">🔥</span>{t("Top 10 Hot News")}</h2>
+                  <button type="button" onClick={() => setActiveFeed("trending")}>{t("See all")} →</button>
+                </div>
+                {hotNews.length ? (
+                  <div className="newsroom-hot-columns">
+                    {[hotNews.slice(0, 5), hotNews.slice(5, 10)].map((articles, columnIndex) => (
+                      <ol className="newsroom-hot-list" key={columnIndex}>
+                        {articles.map((article, index) => (
+                          <li key={article.id}>
+                            <span className="newsroom-hot-rank">{columnIndex * 5 + index + 1}</span>
+                            <ArticleImage article={article} className="newsroom-hot-image" />
+                            <Link href={`/story/${article.id}`} className="newsroom-hot-title">{article.title}</Link>
+                          </li>
+                        ))}
+                      </ol>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="home-empty">{loading ? t("Loading stories…") : t("No stories are available in this section right now.")}</p>
+                )}
+              </section>
+              <StorySection
+                title={t("Latest News")}
+                articles={dashboard.latest || []}
+                saved={saved}
+                onSave={toggleSave}
+                initialCount={6}
+                totalCount={dashboard.total}
+                onLoadMore={nextOffset !== null ? loadMore : undefined}
+                loadingMore={loadingMore}
+                empty="No stories are available in this section right now."
+                loading={loading}
+              />
+            </div>
           ) : (
             <StorySection
               title={activeCategory ? `${t(activeCategory)} · ${t(activeTab.title)}` : t(activeTab.title)}

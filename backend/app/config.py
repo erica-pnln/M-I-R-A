@@ -33,7 +33,13 @@ NEWS_REFRESH_TOKEN = os.getenv("NEWS_REFRESH_TOKEN", "")
 
 def _cors_origins(value: str | None) -> list[str]:
     origins = [origin.strip() for origin in (value or "").split(",") if origin.strip()]
-    return origins or ["http://localhost:3000", "http://127.0.0.1:3000"]
+    if not origins:
+        origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    if "http://localhost:3000" in origins:
+        origins.append("http://localhost:3001")
+    if "http://127.0.0.1:3000" in origins:
+        origins.append("http://127.0.0.1:3001")
+    return list(dict.fromkeys(origins))
 
 
 CORS_ORIGINS = _cors_origins(os.getenv("CORS_ORIGINS"))

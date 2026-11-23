@@ -65,6 +65,15 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual([model.model for model in candidates], ["text-model"])
 
+    def test_default_huggingface_chat_model_is_available_in_router_catalog(self):
+        with patch.dict(os.environ, {
+            "HF_TOKEN": "hf-test-key",
+            "AI_PROVIDER_PRIORITY": "huggingface",
+        }, clear=True):
+            candidates = providers.models_for("general_chat", "Question")
+
+        self.assertEqual(candidates[0].model, "CohereLabs/tiny-aya-global")
+
     def test_cooldown_skips_an_unavailable_model(self):
         providers.record_health("xai:text-model", healthy=False, cooldown_seconds=30)
 
@@ -83,6 +92,17 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(authentication.category, "authentication")
         self.assertFalse(authentication.retryable)
         self.assertFalse(providers._failure_from_response(400, "").retryable)
+
+    def test_invalid_request_error_names_model_and_next_step(self):
+        failure = providers._failure_from_response(
+            400,
+            '{"error":{"message":"Request rejected"}}',
+            provider="huggingface",
+            model="example/model",
+        )
+
+        self.assertIn("huggingface model example/model", str(failure))
+        self.assertIn("supports this request", str(failure))
 
     def test_external_provider_handles_requests_without_a_gemini_client(self):
         config = types.GenerateContentConfig(system_instruction="Be accurate.")

@@ -169,7 +169,7 @@ def configured_models() -> list[ModelSpec]:
         hf_tasks = _all_tasks()
         specs.append(ModelSpec(
             "huggingface",
-            os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta").strip(),
+            os.getenv("HF_MODEL", "CohereLabs/tiny-aya-global").strip(),
             hf_key,
             hf_base,
             hf_tasks,
@@ -276,9 +276,16 @@ def _openai_messages(contents, system: str) -> list[dict]:
     return messages
 
 
-def _failure_from_response(status_code: int, body: str) -> ProviderFailure:
+def _failure_from_response(
+    status_code: int,
+    body: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> ProviderFailure:
     text = body.lower()
     quota = any(word in text for word in ("quota", "billing", "resource_exhausted"))
+    model_name = f" for {provider} model {model}" if provider and model else ""
     if status_code == 429 or (status_code == 403 and quota):
         category = "quota_exhausted" if quota else "rate_limit"
         return ProviderFailure(category, "Provider quota or rate limit reached.",
@@ -291,7 +298,8 @@ def _failure_from_response(status_code: int, body: str) -> ProviderFailure:
                                retryable=True, status_code=status_code)
     return ProviderFailure(
         "invalid_request",
-        f"Provider rejected the request (HTTP {status_code}).",
+        f"Provider rejected the request{model_name} (HTTP {status_code}). "
+        "Check that the configured model supports this request.",
                            status_code=status_code)
 
 
@@ -322,7 +330,12 @@ def generate(spec: ModelSpec, contents, system: str, config) -> tuple[str, dict]
             retryable=True,
         ) from exc
     if response.is_error:
-        raise _failure_from_response(response.status_code, response.text)
+        raise _failure_from_response(
+            response.status_code,
+            response.text,
+            provider=spec.provider,
+            model=spec.model,
+        )
     try:
         payload = response.json()
         text = payload["choices"][0]["message"]["content"]
@@ -356,7 +369,7 @@ def generate_stream(
             if response.is_error:
                 raise _failure_from_response(response.status_code, response.read().decode(
                     "utf-8", errors="replace"
-                ))
+                ), provider=spec.provider, model=spec.model)
             for line in response.iter_lines():
                 if not line.startswith("data:"):
                     continue

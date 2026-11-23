@@ -23,6 +23,36 @@ const LINKS = [
   ["/settings", "settings"],
 ];
 
+function NavIcon({ name }) {
+  const shapes = {
+    home: <><path d="m3.5 10 8.5-7 8.5 7-1.5 1.8L12 5.2l-7 6.6Z" fill="currentColor" fillOpacity=".18" stroke="none" /><path d="M5.5 10.1V20h13v-9.9M9 20v-6h6v6" /></>,
+    chat: <><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H6l-3 2v-6.5A7.5 7.5 0 1 1 20 11.5Z" /><path d="M8 11.5h.01M12 11.5h.01M16 11.5h.01" /></>,
+    news: <><path d="M4 4.5h15a1 1 0 0 1 1 1v14H5a2 2 0 0 1-2-2v-12a1 1 0 0 1 1-1Z" fill="currentColor" fillOpacity=".13" /><path d="M7 8h3m2 0h4M7 11h9M7 14h9M7 17h5M3 17.5a2 2 0 0 0 2 2" /></>,
+    live: <><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" /><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8M2.8 2.8a13 13 0 0 0 0 18.4M21.2 2.8a13 13 0 0 1 0 18.4" /></>,
+    podcast: <><path d="M9 8V6a3 3 0 0 1 6 0v8a3 3 0 0 1-6 0V8Z" fill="currentColor" fillOpacity=".2" /><rect x="9" y="3" width="6" height="12" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6M7 7l-1.5 1.5M17 7l1.5 1.5" /></>,
+    saved: <><path d="M6 4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21l-6-4-6 4V4.5Z" fill="currentColor" fillOpacity=".16" /><path d="m12 7 .9 1.9 2.1.3-1.5 1.5.4 2.1-1.9-1-1.9 1 .4-2.1L9 9.2l2.1-.3L12 7Z" fill="currentColor" fillOpacity=".85" stroke="none" /></>,
+    history: <><circle cx="12" cy="12" r="6.2" fill="currentColor" fillOpacity=".14" stroke="none" /><path d="M3.5 11a8.5 8.5 0 1 1 2.3 6.7M3.5 5.5V11h5.5M12 7v5l3 2" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /></>,
+    settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a8 8 0 0 0 .1-6l1.5-1-1.6-2.8-1.4.6a8 8 0 0 0-5.2-3l-.2-1.5h-3.2l-.2 1.5a8 8 0 0 0-5.2 3L2.6 5.2 1 8l1.5 1a8 8 0 0 0 0 6L1 16l1.6 2.8 1.4-.6a8 8 0 0 0 5.2 3l.2 1.5h3.2l.2-1.5a8 8 0 0 0 5.2-3l1.4.6 1.6-2.8-1.5-1Z" /></>,
+    signIn: <><path d="M13 5h5a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5" /><path d="m10 16 4-4-4-4M14 12H3" /></>,
+    signOut: <><path d="M11 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h5" /><path d="m14 16-4-4 4-4M10 12h11" /></>,
+  };
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="mira-nav-svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+    >
+      {shapes[name]}
+    </svg>
+  );
+}
+
 export default function Nav() {
   const path = usePathname();
   const [user, setUser] = useState(null);
@@ -141,10 +171,11 @@ export default function Nav() {
         className={`mira-sidebar${collapsed ? " is-collapsed" : ""}${resizing ? " is-resizing" : ""}${mobileOpen ? " is-mobile-open" : ""}`}
       >
         <Link href="/" className="mira-brand" onClick={() => setMobileOpen(false)}>
-          <img src="/mira-logo.png" alt="" aria-hidden="true" className="h-24 w-24 object-contain" />
+          <img src="/mira-logo.png" alt="" aria-hidden="true" className="mira-logo-dark mira-brand-mark" />
+          <img src="/mira-logo-light.png" alt="" aria-hidden="true" className="mira-logo-light mira-brand-mark" />
           <span className="mira-brand-card">
             <span className="mira-brand-copy">
-              <strong>Media Intelligence &amp; Research Assistant</strong>
+              <strong>Media Intelligence &amp;<br />Research Assistant</strong>
             </span>
           </span>
         </Link>
@@ -161,13 +192,22 @@ export default function Nav() {
               <Link
                 key={href}
                 href={href}
-                className={`mira-nav-link ${active ? "is-active" : ""}`}
+                className={`mira-nav-link${key === "live" ? " mira-nav-link-live" : ""}${active ? " is-active" : ""}`}
                 title={collapsed ? t(key) : undefined}
                 aria-label={t(key)}
                 onClick={() => setMobileOpen(false)}
               >
-                <span className="mira-nav-icon" aria-hidden="true">
-                  {key === "home" ? "⌂" : key === "chat" ? "✦" : key === "news" ? "▤" : key === "live" ? "◉" : key === "podcast" ? "♫" : key === "saved" ? "⌑" : key === "history" ? "◷" : key === "profile" ? "○" : "⚙"}
+                <span className={`mira-nav-icon mira-nav-icon-${key}`} aria-hidden="true">
+                  {key === "chat" ? (
+                    <img
+                      src="/mira-chat.png"
+                      alt=""
+                      className="mira-chat-nav-icon"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <NavIcon name={key} />
+                  )}
                 </span>
                 <span className="mira-nav-label">{t(key)}</span>
               </Link>
@@ -186,12 +226,12 @@ export default function Nav() {
           )}
           {user ? (
             <button className="mira-nav-link mira-signout" onClick={signOut} title={collapsed ? t("Sign out") : undefined}>
-              <span className="mira-nav-icon" aria-hidden="true">↪</span>
+              <span className="mira-nav-icon" aria-hidden="true"><NavIcon name="signOut" /></span>
               <span className="mira-nav-label">{t("Sign out")}</span>
             </button>
           ) : (
             <Link href="/login" className="mira-nav-link" title={collapsed ? t("Sign in") : undefined} onClick={() => setMobileOpen(false)}>
-              <span className="mira-nav-icon" aria-hidden="true">↪</span>
+              <span className="mira-nav-icon" aria-hidden="true"><NavIcon name="signIn" /></span>
               <span className="mira-nav-label">{t("Sign in")}</span>
             </Link>
           )}
@@ -203,7 +243,12 @@ export default function Nav() {
           aria-expanded={!collapsed}
           onClick={() => setCollapsed((value) => !value)}
         >
-          {collapsed ? <img src="/mira-logo.png" alt="" aria-hidden="true" /> : <span aria-hidden="true">‹</span>}
+          {collapsed ? (
+            <>
+              <img src="/mira-logo.png" alt="" aria-hidden="true" className="mira-logo-dark" />
+              <img src="/mira-logo-light.png" alt="" aria-hidden="true" className="mira-logo-light" />
+            </>
+          ) : <span aria-hidden="true">‹</span>}
         </button>
         {!collapsed && (
           <div
@@ -231,7 +276,14 @@ export default function Nav() {
         aria-expanded={mobileOpen}
         onClick={() => setMobileOpen((value) => !value)}
       >
-        {mobileOpen ? <span aria-hidden="true">×</span> : <img src="/mira-logo.png" alt="" aria-hidden="true" />}
+        {mobileOpen ? (
+          <span aria-hidden="true">×</span>
+        ) : (
+          <>
+            <img src="/mira-logo.png" alt="" aria-hidden="true" className="mira-logo-dark" />
+            <img src="/mira-logo-light.png" alt="" aria-hidden="true" className="mira-logo-light" />
+          </>
+        )}
       </button>
     </>
   );

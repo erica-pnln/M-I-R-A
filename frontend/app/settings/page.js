@@ -55,6 +55,7 @@ function activityDate(value, language, t) {
 
 export default function Settings() {
   const { language, setLanguage, t } = useLanguage();
+  const [theme, setTheme] = useState("dark");
   const [systemLanguage, setSystemLanguage] = useState(language);
   const [aiLanguage, setAiLanguage] = useState("en");
   const [interests, setInterests] = useState([]);
@@ -80,6 +81,20 @@ export default function Settings() {
   const [needLogin, setNeedLogin] = useState(false);
   const editedPreferences = useRef({ systemLanguage: false, aiLanguage: false, interests: {}, journalismFields: {} });
   const hasUnsavedChanges = languageDirty || aiLanguageDirty || newsDirty;
+
+  useEffect(() => {
+    const savedTheme = window.localStorage.getItem("mira-theme");
+    setTheme(savedTheme === "light" ? "light" : "dark");
+  }, []);
+
+  function setAppearance(nextTheme) {
+    const normalizedTheme = nextTheme === "light" ? "light" : "dark";
+    setTheme(normalizedTheme);
+    document.documentElement.dataset.miraTheme = normalizedTheme;
+    window.localStorage.setItem("mira-theme", normalizedTheme);
+    const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+    if (metaThemeColor) metaThemeColor.setAttribute("content", normalizedTheme === "light" ? "#f4f7fb" : "#000000");
+  }
 
   useEffect(() => {
     if (!editedPreferences.current.systemLanguage) setSystemLanguage(language);
@@ -301,6 +316,36 @@ export default function Settings() {
       )}
       {message && <p role="status" className="rounded-xl border border-emerald-400/20 bg-emerald-950/20 p-3 text-sm text-emerald-100">{message}</p>}
       <div className="space-y-6">
+        <section id="appearance" className="glass p-5 sm:p-6">
+          <h2 className="font-display text-xl font-bold">{t("Appearance")}</h2>
+          <p className="mt-1 text-sm text-white/65">{t("Choose how MIRA looks on this device.")}</p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {[
+              { value: "dark", label: "Dark", icon: "🌙" },
+              { value: "light", label: "Light", icon: "☀️" },
+            ].map((option) => (
+              <label
+                key={option.value}
+                className={`flex cursor-pointer items-center gap-3 rounded-xl border p-4 text-sm ${
+                  theme === option.value
+                    ? "border-mira-blue-light bg-mira-blue/15"
+                    : "border-white/10 bg-white/[.03]"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="appearance"
+                  value={option.value}
+                  checked={theme === option.value}
+                  onChange={() => setAppearance(option.value)}
+                />
+                <span className="text-xl" aria-hidden="true">{option.icon}</span>
+                <span className="font-semibold">{t(option.label)}</span>
+              </label>
+            ))}
+          </div>
+        </section>
+
         <section id="language" className="glass p-5 sm:p-6">
           <h2 className="font-display text-xl font-bold">{t("language")}</h2>
           <h3 className="mt-4 font-semibold">{t("systemLanguage")}</h3>

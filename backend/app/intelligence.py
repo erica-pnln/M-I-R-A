@@ -56,7 +56,12 @@ class IntelligenceUnavailable(RuntimeError):
 
 
 def _tokens(text: str) -> list[str]:
-    return [word.lower() for word in _WORD_RE.findall(text or "") if word.lower() not in _STOP_WORDS]
+    normalized_text = (text or "").replace("-", " ")
+    return [
+        word.lower()
+        for word in _WORD_RE.findall(normalized_text)
+        if word.lower() not in _STOP_WORDS
+    ]
 
 
 @lru_cache(maxsize=1)
@@ -90,6 +95,13 @@ def _embedding_model():
         ) from exc
 
 
+def preload_semantic_search() -> None:
+    try:
+        _embedding_model()
+    except IntelligenceUnavailable:
+        logger.exception("Could not preload the semantic news search model")
+
+
 def preprocess_text(text: str) -> list[str]:
     """Normalize text with spaCy tokenization, stop-word filtering, and lemmatization."""
     doc = _nlp()(text or "")
@@ -105,10 +117,44 @@ def _lemmas(doc) -> list[str]:
 
 
 def _article_text(article: dict) -> str:
-    return " ".join(
-        str(article.get(key) or "")
-        for key in ("title", "summary", "text")
-    ).strip()
+    fields = (
+        "title", "summary", "description", "text", "content", "article_text",
+        "topic", "topics", "event", "events", "issue", "issues", "author",
+        "person", "people", "persons", "names", "entities", "location",
+        "locations", "place", "places", "source", "publisher", "channel",
+        "category", "tags", "search_metadata",
+    )
+    values = []
+    for key in fields:
+        value = article.get(key)
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, dict):
+            values.extend(
+                item for field in ("text", "value", "name", "title", "label")
+                if isinstance((item := value.get(field)), str)
+            )
+        elif isinstance(value, (list, tuple, set)):
+            items = sorted(value, key=str) if isinstance(value, set) else value
+            for item in items:
+                if isinstance(item, str):
+                    values.append(item)
+                elif isinstance(item, dict):
+                    values.extend(
+                        text for field in ("text", "value", "name", "title", "label")
+                        if isinstance((text := item.get(field)), str)
+                    )
+    return " ".join(value for value in values if value).strip()
+
+
+def exact_term_matches(query: str, articles: list[dict]) -> list[dict]:
+    terms = set(_tokens(query))
+    if not terms:
+        return []
+    return [
+        article for article in articles
+        if terms.issubset(_tokens(_article_text(article)))
+    ]
 
 
 def fast_search(
@@ -381,7 +427,13 @@ def _index_embeddings(articles: list[dict], vectors) -> None:
             _indexed_hashes.popitem(last=False)
 
 
-def hybrid_search(query: str, articles: list[dict], limit: int = 10) -> tuple[list[dict], str]:
+def hybrid_search(
+    query: str,
+    articles: list[dict],
+    limit: int = 10,
+    *,
+    use_vector_store: bool = True,
+) -> tuple[list[dict], str]:
     """Combine BM25 keyword retrieval and sentence-transformer cosine similarity."""
     if not query.strip() or not articles:
         return articles[:limit], "empty"
@@ -395,7 +447,7 @@ def hybrid_search(query: str, articles: list[dict], limit: int = 10) -> tuple[li
     tokenized = [_tokens(text) for text in texts]
     query_tokens = _tokens(query)
     all_bm25_scores = BM25Okapi(tokenized).get_scores(query_tokens)
-    candidate_count = min(len(articles), max(100, limit * 10))
+    candidate_count = min(len(articles), max(100, limit * 2))
     candidate_indices = sorted(
         range(len(articles)),
         key=lambda index: (
@@ -411,7 +463,7 @@ def hybrid_search(query: str, articles: list[dict], limit: int = 10) -> tuple[li
 
     article_vectors, _ = _encode_articles(candidates)
     semantic_scores = cosine_similarity([query_vector], article_vectors)[0]
-    if sb is not None:
+    if sb is not None and use_vector_store:
         try:
             _index_embeddings(candidates, article_vectors)
         except Exception as exc:
@@ -420,7 +472,7 @@ def hybrid_search(query: str, articles: list[dict], limit: int = 10) -> tuple[li
                 "Could not index embeddings. Apply the current supabase/schema.sql migration."
             ) from exc
 
-    if sb is not None:
+    if sb is not None and use_vector_store:
         try:
             candidate_limit = min(len(articles), max(limit * 5, 50))
             response = sb.rpc("hybrid_search_articles", {
