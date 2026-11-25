@@ -1,5 +1,8 @@
+import asyncio
+import json
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from app import ask_story, ask_story_research, main
 
@@ -101,6 +104,63 @@ class AskStoryResearchTests(unittest.TestCase):
         self.assertIn("only 2 distinct", disclosure)
         self.assertIn("selected story and unrelated stories are excluded", disclosure)
 
+    def test_explicit_source_topic_excludes_generic_campaign_matches(self):
+        article = {
+            "title": "DILG Caraga underscores LGU role in anti-drug campaign",
+            "source": "Philippine Information Agency",
+            "url": "https://pia.gov.ph/news/anti-drug-campaign",
+            "summary": "The agency supports local governments in anti-drug efforts.",
+        }
+        request = "Give me 3 sources reports of anti drug campaign"
+        candidates = [
+            {
+                "title": "Shabu seized in Caraga drug busts",
+                "summary": "Police action supports the anti-drug campaign.",
+                "domain": "rappler.com",
+                "url": "https://www.rappler.com/philippines/caraga-drug-bust",
+            },
+            {
+                "title": "Alice Huang had contact with China spy agency",
+                "summary": "The report mentions a campaign during an Nvidia boss affair.",
+                "domain": "nytimes.com",
+                "url": "https://www.nytimes.com/world/alice-huang",
+            },
+            {
+                "title": "DILG is latest government agency to report data leak",
+                "summary": "The department reported a cybersecurity incident.",
+                "domain": "inquirer.net",
+                "url": "https://www.inquirer.net/news/dilg-data-leak",
+            },
+            {
+                "title": "Knesset readies for new speaker",
+                "summary": "Israeli opposition campaign prepares for a vote.",
+                "domain": "apnews.com",
+                "url": "https://apnews.com/article/knesset-speaker",
+            },
+        ]
+
+        relevance = [
+            ask_story_research._is_relevant_to_story(
+                article,
+                request,
+                candidate,
+                require_requested_topics=True,
+            )
+            for candidate in candidates
+        ]
+        contextual_relevance = [
+            ask_story_research._is_relevant_to_story(
+                article,
+                "give 3 sources report related to this report",
+                candidate,
+                require_requested_topics=True,
+            )
+            for candidate in candidates
+        ]
+
+        self.assertEqual(relevance, [True, False, False, False])
+        self.assertEqual(contextual_relevance, [True, False, False, False])
+
     def test_source_count_defaults_to_four_and_respects_explicit_request(self):
         self.assertEqual(
             ask_story_research.requested_source_count("Explain this story"),
@@ -115,6 +175,18 @@ class AskStoryResearchTests(unittest.TestCase):
         self.assertEqual(
             ask_story_research.requested_source_count("Give me up to 2 sources"),
             2,
+        )
+        self.assertEqual(
+            ask_story_research.requested_source_count(
+                "Give me at least 6 links related to Pax Silica"
+            ),
+            6,
+        )
+        self.assertEqual(
+            ask_story_research.requested_source_count(
+                "Provide at least 5 sources reports of Pax Silica issue"
+            ),
+            5,
         )
         self.assertEqual(
             ask_story_research.requested_source_count("List 3 key points"),
@@ -152,6 +224,167 @@ class AskStoryResearchTests(unittest.TestCase):
             self.assertEqual(len(result["sources"]), expected_count)
             self.assertEqual(rank_sources.call_args.kwargs["limit"], expected_count)
 
+    def test_chat_source_request_uses_enough_captured_sources_without_external_search(self):
+        articles = [
+            {
+                "id": f"pax-{index}",
+                "title": f"Pax Silica coverage {index}",
+                "summary": f"Reporting about Pax Silica in the Philippines, article {index}.",
+                "source": f"Publisher {index}",
+                "url": f"https://{('apnews.com', 'bbc.com')[index - 1]}/pax-silica",
+            }
+            for index in (1, 2)
+        ]
+        with (
+            patch.dict(
+                main.news._cache,
+                {"items": articles, "stored_loaded": False},
+            ),
+            patch.object(main.news, "ensure_stored_cache_loaded") as ensure_stored,
+            patch.object(main, "_retrieve", return_value=articles),
+            patch.object(main, "_rank_chat_sources", return_value=articles),
+            patch.object(main.news, "search_discovery") as search,
+        ):
+            started = time.perf_counter()
+            result = main._research_context(
+                [{"role": "user", "content": "Find 2 sources about Pax Silica"}],
+                "chat",
+            )
+            elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 5.0)
+        ensure_stored.assert_not_called()
+        search.assert_not_called()
+        self.assertEqual(
+            [source["retrieval_origin"] for source in result["sources"]],
+            ["captured", "captured"],
+        )
+        reply = main._append_research_source_references(
+            "Here are the sources.", result["sources"], include_all_sources=True
+        )
+        self.assertIn("Captured by MIRA", reply)
+        self.assertIn(articles[0]["url"], reply)
+
+    def test_warm_cache_pax_source_request_skips_archive_reload(self):
+        domains = (
+            "apnews.com",
+            "bbc.com",
+            "reuters.com",
+            "pna.gov.ph",
+            "rappler.com",
+        )
+        articles = [
+            {
+                "id": f"pax-{index}",
+                "title": f"Pax Silica report {index}",
+                "summary": "Pax Silica coverage and responses in the Philippines.",
+                "source": f"Publisher {index}",
+                "url": f"https://{domain}/pax-silica",
+            }
+            for index, domain in enumerate(domains, start=1)
+        ]
+        with (
+            patch.dict(
+                main.news._cache,
+                {"items": articles, "stored_loaded": False},
+            ),
+            patch.object(main.news, "ensure_stored_cache_loaded") as ensure_stored,
+            patch.object(main, "_retrieve") as retrieve,
+            patch.object(main, "_rank_chat_sources") as bm25_search,
+            patch.object(main.news, "search_discovery") as search,
+        ):
+            started = time.perf_counter()
+            result = main._research_context(
+                [{
+                    "role": "user",
+                    "content": "Provide at least 5 sources reports of Pax Silica issue",
+                }],
+                "chat",
+            )
+            elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 5.0)
+        ensure_stored.assert_not_called()
+        retrieve.assert_not_called()
+        bm25_search.assert_not_called()
+        search.assert_not_called()
+        self.assertEqual(len(result["sources"]), 5)
+        self.assertEqual(
+            ask_story_research.requested_source_count(
+                "Provide at least 5 sources reports of Pax Silica issue"
+            ),
+            5,
+        )
+
+    def test_incomplete_source_lists_are_not_cached_as_complete(self):
+        prompt = "List 4 sources about cache-shortfall volcano"
+        sources = [{
+            "id": "captured-volcano",
+            "title": "Volcano report",
+            "source": "Publisher",
+            "url": "https://publisher.example/volcano",
+        }]
+
+        main._cache_source_list(prompt, sources)
+
+        cached = main._cached_source_list_context(
+            "Give me 4 links about cache-shortfall volcano"
+        )
+        self.assertIsNone(cached)
+
+    def test_incomplete_ask_story_source_lists_are_not_cached_as_complete(self):
+        article = {"id": "volcano-story", "title": "Volcano briefing"}
+        prompt = "Find 3 sources about cache-shortfall volcano"
+        sources = [{
+            "id": "S1",
+            "title": "Volcano report",
+            "url": "https://publisher.example/volcano",
+        }]
+
+        main._cache_ask_story_sources(article, prompt, 3, sources)
+
+        self.assertIsNone(
+            main._cached_ask_story_sources(
+                article, "Give me 3 links about cache-shortfall volcano", 3
+            )
+        )
+
+    def test_ask_story_source_cache_rejects_stale_unrelated_results(self):
+        article = {
+            "id": "dilg-caraga-story",
+            "title": "DILG Caraga underscores LGU role in anti-drug campaign",
+            "source": "Philippine Information Agency",
+            "url": "https://pia.gov.ph/news/anti-drug-campaign",
+        }
+        prompt = "give 3 sources report related to this report"
+        cached_sources = [
+            {
+                "title": "8 nabbed, shabu seized in Caraga drug busts",
+                "summary": "Police support the anti-drug campaign.",
+                "source": "Philippine Daily Inquirer",
+                "url": "https://newsinfo.inquirer.net/caraga-drug-bust",
+            },
+            {
+                "title": "Alice Huang had contact with China spy agency during affair with Nvidia boss, New York Times reports",
+                "summary": "A report on China and Nvidia.",
+                "source": "France 24",
+                "url": "https://www.france24.com/en/americas/alice-huang",
+            },
+            {
+                "title": "As Knesset readies for new speaker, Israeli opposition holds powerful role",
+                "summary": "The latest Israeli political developments.",
+                "source": "Al Jazeera",
+                "url": "https://www.aljazeera.com/news/knesset-speaker",
+            },
+        ]
+
+        with patch.dict(main._ASK_STORY_SOURCE_CACHE, {}, clear=True):
+            main._cache_ask_story_sources(article, prompt, 3, cached_sources)
+
+            cached = main._cached_ask_story_sources(article, prompt, 3)
+
+        self.assertIsNone(cached)
+
     def test_quick_article_lookup_skips_synchronous_image_enrichment(self):
         article = {
             "id": "quick-story",
@@ -165,6 +398,18 @@ class AskStoryResearchTests(unittest.TestCase):
 
         self.assertIs(result, article)
         page_image.assert_not_called()
+
+    def test_source_search_loads_archive_when_live_cache_is_warm(self):
+        with (
+            patch.dict(
+                main.news._cache,
+                {"items": [{"id": "live-article"}], "stored_loaded": False},
+            ),
+            patch.object(main.news, "_load_stored_once") as load_stored,
+        ):
+            main.news.ensure_stored_cache_loaded()
+
+        load_stored.assert_called_once_with(force=True)
 
     def test_chat_source_followup_uses_assistant_topic_and_lists_only_relevant_sources(self):
         messages = [
@@ -209,23 +454,19 @@ class AskStoryResearchTests(unittest.TestCase):
             },
         ]
         with (
-            patch.object(main.news, "ensure_stored_cache_loaded"),
-            patch.object(main, "_retrieve", return_value=[]),
+            patch.dict(main.news._cache, {"items": []}),
             patch.object(
-                main.news,
-                "search_discovery",
-                return_value={"articles": live_articles, "source_errors": []},
-            ) as search,
-            patch.object(main.news, "_decode_google_news_urls", return_value={}),
-            patch.object(
-                main.intelligence, "fast_search",
-                return_value=(live_articles, None),
-            ),
+                main.ask_story_research,
+                "external_sources",
+                return_value=live_articles[:2],
+            ) as external_search,
+            patch.object(main.news, "search_discovery") as search,
         ):
             result = main._research_context(messages, "auto")
 
-        self.assertIn("pax", search.call_args.args[0].casefold())
-        self.assertIn("silica", search.call_args.args[0].casefold())
+        self.assertIn("pax", external_search.call_args.args[0].casefold())
+        self.assertIn("silica", external_search.call_args.args[0].casefold())
+        search.assert_not_called()
         self.assertEqual(
             [source["id"] for source in result["sources"]],
             ["pax-rappler", "pax-inquirer"],
@@ -240,6 +481,110 @@ class AskStoryResearchTests(unittest.TestCase):
         self.assertIn("https://www.rappler.com/news/pax-silica-protest", reply)
         self.assertIn("https://www.inquirer.net/news/pax-silica", reply)
         self.assertNotIn("kate-recovery", reply)
+
+    def test_chat_sources_include_only_one_article_per_publisher(self):
+        articles = [
+            {
+                "id": "inquirer-one",
+                "title": "Pax Silica debate in the Philippines",
+                "summary": "Philippine groups discuss Pax Silica.",
+                "url": "https://www.inquirer.net/news/pax-silica",
+            },
+            {
+                "id": "inquirer-two",
+                "title": "Pax Silica draws attention in the Philippines",
+                "summary": "More Philippine coverage of Pax Silica.",
+                "url": "https://business.inquirer.net/news/pax-silica",
+            },
+            {
+                "id": "rappler",
+                "title": "Pax Silica questions in the Philippines",
+                "summary": "Philippine groups question Pax Silica.",
+                "url": "https://www.rappler.com/technology/pax-silica",
+            },
+            {
+                "id": "bbc-uk",
+                "title": "Pax Silica and the Philippines",
+                "summary": "Coverage of Pax Silica in the Philippines.",
+                "url": "https://www.bbc.co.uk/news/pax-silica",
+            },
+            {
+                "id": "bbc-com",
+                "title": "Pax Silica and Philippine policy",
+                "summary": "Coverage of Pax Silica in the Philippines.",
+                "url": "https://www.bbc.com/news/pax-silica",
+            },
+            {
+                "id": "ap",
+                "title": "Pax Silica impacts the Philippines",
+                "summary": "Philippine groups respond to Pax Silica.",
+                "url": "https://apnews.com/article/pax-silica",
+            },
+        ]
+        with patch.object(
+            main.intelligence,
+            "fast_search",
+            return_value=(articles, None),
+        ):
+            sources = main._rank_chat_sources(
+                "Pax Silica Philippines", articles, limit=4
+            )
+
+        self.assertEqual(
+            [source["id"] for source in sources],
+            ["inquirer-one", "rappler", "bbc-uk", "ap"],
+        )
+
+    def test_chat_source_fallback_searches_once_after_captured_sources(self):
+        messages = [{
+            "role": "user",
+            "content": "Give me at least 4 sources related to Pax Silica Philippines",
+        }]
+        captured = [
+            {
+                "id": "pax-inquirer",
+                "title": "Pax Silica debate in the Philippines",
+                "summary": "Philippine groups discuss Pax Silica.",
+                "url": "https://www.inquirer.net/news/pax-silica",
+            },
+            {
+                "id": "pax-rappler",
+                "title": "Pax Silica questions in the Philippines",
+                "summary": "Philippine groups question Pax Silica.",
+                "url": "https://www.rappler.com/technology/pax-silica",
+            },
+        ]
+        external = [
+            {
+                "id": "pax-ap",
+                "title": "Pax Silica and the Philippines",
+                "summary": "The Philippines responds to Pax Silica.",
+                "url": "https://apnews.com/article/pax-silica",
+            },
+            {
+                "id": "pax-reuters",
+                "title": "Pax Silica and Philippine policy",
+                "summary": "Philippine policy on Pax Silica.",
+                "url": "https://www.reuters.com/world/pax-silica",
+            },
+        ]
+        with (
+            patch.dict(main.news._cache, {"items": captured}),
+            patch.object(
+                main.ask_story_research,
+                "external_sources",
+                return_value=external,
+            ) as external_search,
+            patch.object(main.news, "search_discovery") as search,
+        ):
+            result = main._research_context(messages, "auto")
+
+        self.assertEqual(
+            [source["id"] for source in result["sources"]],
+            ["pax-inquirer", "pax-rappler", "pax-ap", "pax-reuters"],
+        )
+        external_search.assert_called_once()
+        search.assert_not_called()
 
     def test_ask_story_uses_default_and_requested_source_counts(self):
         article = {"id": "story-id", "title": "Selected story"}
@@ -256,16 +601,17 @@ class AskStoryResearchTests(unittest.TestCase):
                 patch.object(
                     main.news, "article_text", return_value="Article text"
                 ) as article_text,
-                patch.object(
-                    main, "_retrieve", return_value=[]
-                ) as retrieve,
+                patch.object(main.news, "ensure_stored_cache_loaded"),
+                patch.object(main, "_retrieve", return_value=[]) as retrieve,
                 patch.object(
                     main.ask_story_research,
                     "research_sources",
                     return_value=([], "Research retrieval found no sources."),
                 ) as research_sources,
                 patch.object(main, "_ai_language_instruction", return_value=""),
-                patch.object(main.ask_story, "generate", return_value=("Answer", "model")),
+                patch.object(
+                    main.ask_story, "generate", return_value=("Answer", "model")
+                ) as generate,
                 patch.object(main.ask_story, "append_sources", return_value="Answer"),
                 patch.object(main, "_save_story_turn", return_value=None),
             ):
@@ -277,17 +623,91 @@ class AskStoryResearchTests(unittest.TestCase):
                     uid=None,
                 )
 
-            self.assertEqual(retrieve.call_args.kwargs["limit"], expected_count)
+            if prompt == "Find 3 sources about this story":
+                retrieve.assert_not_called()
+            else:
+                self.assertEqual(retrieve.call_args.kwargs["limit"], expected_count)
             get_article.assert_called_once_with(
                 "story-id", enrich_image=False
             )
             self.assertEqual(research_sources.called, deep_research)
-            self.assertEqual(article_text.called, deep_research)
+            source_list_only = prompt == "Find 3 sources about this story"
+            self.assertEqual(article_text.called, deep_research and not source_list_only)
+            self.assertEqual(generate.called, not source_list_only)
             if deep_research:
                 self.assertEqual(
                     research_sources.call_args.kwargs["limit"],
                     expected_count,
                 )
+                self.assertEqual(
+                    research_sources.call_args.kwargs["fetch_article_text"],
+                    not source_list_only,
+                )
+
+    def test_ask_story_streams_status_and_lists_sources_without_ai(self):
+        async def collect(response, retrieve):
+            iterator = response.body_iterator.__aiter__()
+            first = await iterator.__anext__()
+            first = first.decode("utf-8") if isinstance(first, bytes) else first
+            self.assertIn("MIRA is analysing", first)
+            retrieve.assert_not_called()
+            return [
+                first,
+                *[
+                    item.decode("utf-8") if isinstance(item, bytes) else item
+                    async for item in iterator
+                ],
+            ]
+
+        article = {
+            "id": "pax-story",
+            "title": "Pax Silica: A policy briefing",
+            "summary": "A story about the Pax Silica initiative.",
+            "source": "Original Publisher",
+            "url": "https://publisher.example/pax-silica",
+        }
+        sources = [
+            {
+                "title": f"Pax Silica supporting report {index}",
+                "source": f"Publisher {index}",
+                "url": f"https://publisher{index}.example/pax-silica",
+            }
+            for index in (1, 2)
+        ]
+        with (
+            patch.object(main.news, "get_article", return_value=article),
+            patch.dict(main.news._cache, {"stored_loaded": False}),
+            patch.object(main.news, "ensure_stored_cache_loaded") as ensure_stored,
+            patch.object(main, "_retrieve", return_value=[]) as retrieve,
+            patch.object(
+                main.ask_story_research,
+                "research_sources",
+                return_value=(sources, "Two relevant sources found."),
+            ),
+            patch.object(main.news, "article_text") as article_text,
+            patch.object(main.ask_story, "generate_stream") as generate_stream,
+            patch.object(main, "_save_story_turn", return_value="conversation-1"),
+        ):
+            response = main.ask(
+                main.AskIn(
+                    article_id="pax-story",
+                    messages=[main.Msg(
+                        role="user",
+                        content="Find 2 sources about this story",
+                    )],
+                ),
+                uid=None,
+                stream=True,
+            )
+            events = asyncio.run(collect(response, retrieve))
+
+        decoded = [json.loads(event.removeprefix("data: ").strip()) for event in events]
+        self.assertEqual(decoded[1]["text"], "MIRA is typing…")
+        self.assertIn("https://publisher1.example/pax-silica", decoded[-1]["reply"])
+        self.assertIn("https://publisher2.example/pax-silica", decoded[-1]["reply"])
+        article_text.assert_not_called()
+        generate_stream.assert_not_called()
+        ensure_stored.assert_not_called()
 
     def test_sources_list_does_not_repeat_the_selected_story(self):
         article = {
@@ -359,6 +779,91 @@ class AskStoryResearchTests(unittest.TestCase):
         self.assertTrue(all(source["article_text"] for source in sources))
         self.assertIn("5 distinct", disclosure)
 
+    def test_source_list_reuses_captured_articles_without_downloading_pages(self):
+        article = {
+            "title": "Pax Silica policy briefing",
+            "url": "https://www.reuters.com/world/pax-silica-selected",
+            "summary": "The selected story describes the Pax Silica initiative.",
+        }
+        related = [{
+            "id": "pax-support",
+            "title": "Pax Silica coverage in the Philippines",
+            "source": "Reuters",
+            "url": "https://www.rappler.com/news/pax-silica",
+            "image": "https://www.rappler.com/tachyon/2026/11/pax-silica.jpg",
+            "published": "2026-11-20",
+            "summary": "Coverage describes the Pax Silica initiative and its impact in the Philippines.",
+        }]
+        with (
+            patch.object(ask_story_research, "_google_news_candidates") as search,
+            patch.object(ask_story_research, "_fetch_article_text") as fetch,
+        ):
+            sources, _disclosure = ask_story_research.research_sources(
+                article,
+                "Find 1 source about Pax Silica",
+                related,
+                limit=1,
+                fetch_article_text=False,
+            )
+
+        search.assert_not_called()
+        fetch.assert_not_called()
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["retrieval_origin"], "captured")
+        self.assertEqual(sources[0]["url"], related[0]["url"])
+        self.assertEqual(sources[0]["image"], related[0]["image"])
+        self.assertEqual(sources[0]["published"], related[0]["published"])
+        self.assertEqual(sources[0]["article_text"], "")
+
+    def test_source_list_external_search_uses_bounded_network_timeouts(self):
+        with patch.object(
+            ask_story_research, "_google_news_candidates", return_value=[]
+        ) as search:
+            ask_story_research.research_sources(
+                {"title": "Pax Silica policy briefing"},
+                "Find 2 sources about Pax Silica",
+                [],
+                limit=2,
+                fetch_article_text=False,
+            )
+
+        self.assertTrue(search.call_args_list)
+        self.assertTrue(all(
+            call.kwargs["timeout"] <= 1.34
+            and call.kwargs["resolve_timeout"] <= 1.34
+            for call in search.call_args_list
+        ))
+
+    def test_source_references_identify_external_results(self):
+        reply = ask_story.append_sources(
+            "Relevant source.",
+            [{
+                "title": "Pax Silica report",
+                "source": "Philippine Daily Inquirer",
+                "url": "https://globalnation.inquirer.net/pax-silica",
+                "image": "https://www.inquirer.net/images/pax-silica.jpg",
+                "retrieval_origin": "external",
+            }],
+            include_all_sources=True,
+        )
+
+        self.assertIn("Newly retrieved externally", reply)
+        self.assertIn("[Pax Silica report — Philippine Daily Inquirer]", reply)
+        self.assertIn("![Pax Silica report thumbnail]", reply)
+        self.assertIn(
+            "https://www.inquirer.net/images/pax-silica.jpg",
+            reply,
+        )
+        self.assertIn(
+            "- [S1]\n"
+            "  ![Pax Silica report thumbnail]"
+            "(https://www.inquirer.net/images/pax-silica.jpg)\n"
+            "  [Pax Silica report — Philippine Daily Inquirer]"
+            "(https://globalnation.inquirer.net/pax-silica)",
+            reply,
+        )
+        self.assertIn("https://globalnation.inquirer.net/pax-silica", reply)
+
     def test_research_retries_with_headline_when_focused_search_is_sparse(self):
         def search(query):
             if query == "Mindanao Avenue lane expansion effects students":
@@ -408,6 +913,84 @@ class AskStoryResearchTests(unittest.TestCase):
         self.assertEqual(len(sources), 5)
         self.assertEqual(len({source["domain"] for source in sources}), 5)
         self.assertIn("5 distinct", disclosure)
+
+    def test_external_source_fallback_is_bounded_and_cached(self):
+        candidate = {
+            "id": "pax-source",
+            "title": "Pax Silica report discusses policy",
+            "source": "Reuters",
+            "url": "https://www.reuters.com/world/pax-silica",
+            "summary": "Pax Silica policy and the Philippines.",
+            "domain": "reuters.com",
+            "retrieval_origin": "external",
+        }
+        with (
+            patch.dict(ask_story_research._SOURCE_CACHE, {}, clear=True),
+            patch.object(
+                ask_story_research,
+                "_google_news_candidates",
+                return_value=[candidate],
+            ) as search,
+        ):
+            first = ask_story_research.external_sources("Pax Silica", limit=1)
+            second = ask_story_research.external_sources("Pax Silica", limit=1)
+
+        self.assertEqual(
+            search.call_args_list,
+            [
+                call(
+                    "Pax Silica", limit=24, timeout=1.2, resolve_timeout=1.0
+                ),
+                call(
+                    "Pax Silica Philippines",
+                    limit=24,
+                    timeout=1.2,
+                    resolve_timeout=1.0,
+                ),
+            ],
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first[0]["url"], candidate["url"])
+        self.assertEqual(first[0]["retrieval_origin"], "external")
+
+    def test_source_lists_fill_requested_count_from_repeat_publishers(self):
+        article = {
+            "title": "Pax Silica policy briefing",
+            "url": "https://www.bbc.com/news/selected-story",
+        }
+        related = [
+            {
+                "id": f"pax-{index}",
+                "title": f"Pax Silica report {index}",
+                "source": publisher,
+                "url": f"https://{domain}/pax-silica-{index}",
+                "summary": "Coverage of Pax Silica policy in the Philippines.",
+            }
+            for index, (publisher, domain) in enumerate((
+                ("Reuters", "reuters.com"),
+                ("AP News", "apnews.com"),
+                ("Reuters", "reuters.com"),
+                ("AP News", "apnews.com"),
+                ("Reuters", "reuters.com"),
+            ), start=1)
+        ]
+        with (
+            patch.object(ask_story_research, "_google_news_candidates", return_value=[]),
+            patch.object(ask_story_research, "_fetch_article_text", return_value=""),
+        ):
+            sources, _disclosure = ask_story_research.research_sources(
+                article,
+                "Find 5 sources about Pax Silica",
+                related,
+                limit=5,
+                fetch_article_text=False,
+            )
+
+        self.assertEqual(len(sources), 5)
+        self.assertEqual(
+            [source["domain"] for source in sources[:2]],
+            ["reuters.com", "apnews.com"],
+        )
 
     def test_research_uses_broader_headline_terms_if_other_searches_are_sparse(self):
         headline = "Trump claims PH to buy farm energy goods from US; Marcos clarifies"

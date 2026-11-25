@@ -54,7 +54,7 @@ export async function api(path, { method = "GET", body } = {}) {
   return res.json();
 }
 
-export async function apiStream(path, { body, onToken } = {}) {
+export async function apiStream(path, { body, onToken, onStatus } = {}) {
   const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
   const headers = body !== undefined && !isFormData ? { "Content-Type": "application/json" } : {};
   if (supabase) {
@@ -104,6 +104,8 @@ export async function apiStream(path, { body, onToken } = {}) {
     const event = JSON.parse(data);
     if (event.type === "token") {
       onToken?.(event.text);
+    } else if (event.type === "status") {
+      onStatus?.(event.text);
     } else if (event.type === "error") {
       throw new Error(event.message || "The assistant could not complete its response.");
     } else if (event.type === "done") {

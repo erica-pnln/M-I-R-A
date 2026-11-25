@@ -93,6 +93,7 @@ _IMAGE_HOST_SUFFIXES = (
     "ph",
     "philstar.com",
     "pff.org.ph",
+    "pia.gov.ph",
     "pna.gov.ph",
     "ptvnews.ph",
     "rappler.com",
@@ -345,7 +346,9 @@ def _google_article_id(article_url: str) -> str | None:
     return path[-1] or None
 
 
-def _google_article_signature(article_url: str) -> tuple[str, str, str] | None:
+def _google_article_signature(
+    article_url: str, *, timeout: float = 10,
+) -> tuple[str, str, str] | None:
     article_id = _google_article_id(article_url)
     if not article_id:
         return None
@@ -361,7 +364,7 @@ def _google_article_signature(article_url: str) -> tuple[str, str, str] | None:
     )
     response = httpx.get(
         params_url,
-        timeout=10,
+        timeout=timeout,
         follow_redirects=True,
         headers={"User-Agent": "Mozilla/5.0 (compatible; MIRA/0.1)"},
     )
@@ -373,7 +376,9 @@ def _google_article_signature(article_url: str) -> tuple[str, str, str] | None:
     return article_id, timestamp.group(1), signature.group(1)
 
 
-def _decode_google_news_urls(article_urls: list[str]) -> dict[str, str]:
+def _decode_google_news_urls(
+    article_urls: list[str], *, timeout: float = 20,
+) -> dict[str, str]:
     google_urls = [
         url for url in dict.fromkeys(article_urls)
         if _google_article_id(url)
@@ -384,7 +389,7 @@ def _decode_google_news_urls(article_urls: list[str]) -> dict[str, str]:
     pending = []
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
-            pool.submit(_google_article_signature, url): url
+            pool.submit(_google_article_signature, url, timeout=timeout): url
             for url in google_urls
         }
         for future in as_completed(futures):
@@ -424,7 +429,7 @@ def _decode_google_news_urls(article_urls: list[str]) -> dict[str, str]:
         response = httpx.post(
             "https://news.google.com/_/DotsSplashUi/data/batchexecute",
             content="f.req=" + quote(json.dumps([requests_data], separators=(",", ":"))),
-            timeout=20,
+            timeout=timeout,
             headers={
                 "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
                 "User-Agent": "Mozilla/5.0 (compatible; MIRA/0.1)",
@@ -922,12 +927,12 @@ def _publish(items: list[dict], at: float | None = None) -> None:
     _by_id.update({article["id"]: article for article in items})
 
 
-def _load_stored_articles() -> list[dict]:
+def _load_stored_articles(limit: int = 5000) -> list[dict]:
     if sb is None:
         return []
     articles = []
     batch_size = 1000
-    for offset in range(0, 100000, batch_size):
+    for offset in range(0, limit, batch_size):
         rows = sb.table("articles").select("*").order(
             "published", desc=True
         ).range(offset, offset + batch_size - 1).execute()
@@ -1170,8 +1175,8 @@ def _load_stored_once(force: bool = False) -> None:
 
 
 def ensure_stored_cache_loaded() -> None:
-    """Load persisted news before research when the background cache is still cold."""
-    _load_stored_once()
+    """Load persisted news before research, including alongside a warm live cache."""
+    _load_stored_once(force=True)
 
 
 def _ensure_cached() -> None:
@@ -1237,6 +1242,7 @@ def search_discovery(
     sort: str = "relevance",
     limit: int = 50,
     offset: int = 0,
+    timeout_seconds: float = 5.0,
 ) -> dict:
     """Search the saved archive and query a public news RSS search independently of Trending."""
     if period not in {"all", "latest", "historical"}:
@@ -1264,7 +1270,7 @@ def search_discovery(
     )
     cache_key = (
         rss_query.casefold(), section, scope, topic.casefold() if topic else None,
-        period, effective_start, effective_end,
+        period, effective_start, effective_end, timeout_seconds,
     )
     now = time.monotonic()
     with _search_cache_lock:
@@ -1324,7 +1330,7 @@ def search_discovery(
             "section": feed_section,
             "url": query_url,
             "max_items": 100,
-            "timeout_seconds": 5,
+            "timeout_seconds": timeout_seconds,
             "retries": 0,
         }
         try:

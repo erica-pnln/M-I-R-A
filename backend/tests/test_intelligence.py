@@ -2334,7 +2334,7 @@ class IntelligenceTests(unittest.TestCase):
     def test_chat_does_not_wait_for_archive_or_live_search_for_general_questions(self):
         with (
             patch.object(main.news, "ensure_stored_cache_loaded") as ensure_cache,
-            patch.object(main, "_retrieve", return_value=[]),
+            patch.object(main, "_retrieve") as retrieve,
             patch.object(main.news, "search_discovery") as search,
         ):
             result = main._research_context(
@@ -2343,6 +2343,7 @@ class IntelligenceTests(unittest.TestCase):
 
         self.assertEqual(result["sources"], [])
         ensure_cache.assert_not_called()
+        retrieve.assert_not_called()
         search.assert_not_called()
 
     def test_chat_research_searches_live_and_filters_untrusted_or_irrelevant_results(self):
@@ -2702,6 +2703,170 @@ class IntelligenceTests(unittest.TestCase):
         self.assertIn('"type": "token", "text": " answer."', events[1])
         self.assertIn('"type": "done"', events[2])
         self.assertIn('"conversation_id": "conversation-1"', events[2])
+
+    def test_streaming_chat_opens_before_live_source_research(self):
+        body = main.ChatIn(messages=[
+            main.Msg(role="user", content="Give me 4 sources related to Pax Silica")
+        ])
+        research = {
+            "sources": [],
+            "insufficient": None,
+            "trend": False,
+            "analysis": False,
+            "prefix": "",
+            "source_ids": [],
+            "trend_ids": [],
+        }
+
+        with (
+            patch.dict(main._SOURCE_LIST_CACHE, {}, clear=True),
+            patch.object(main, "_research_context", return_value=research) as get_research,
+            patch.object(ai, "_need_client"),
+            patch.object(ai, "chat_stream", return_value=iter(["Here are sources."])),
+            patch.object(main, "_save_turn", return_value="conversation-1"),
+        ):
+            response = main.chat(body, uid=None, stream=True)
+
+            async def consume():
+                iterator = response.body_iterator.__aiter__()
+                first = await iterator.__anext__()
+                first = first.decode("utf-8") if isinstance(first, bytes) else first
+                self.assertIn('"type": "status"', first)
+                self.assertIn("MIRA is analysing", first)
+                get_research.assert_not_called()
+                return [
+                    first,
+                    *[
+                        chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+                        async for chunk in iterator
+                    ],
+                ]
+
+            events = asyncio.run(consume())
+
+        get_research.assert_called_once()
+        self.assertIn('"type": "done"', events[-1])
+
+    def test_source_list_request_returns_retrieved_links_without_calling_ai(self):
+        body = main.ChatIn(messages=[
+            main.Msg(
+                role="user",
+                content="Give me at least 4 links or sources related to Pax Silica",
+            )
+        ])
+        sources = [
+            {
+                "id": f"pax-{index}",
+                "title": f"Pax Silica report {index}",
+                "source": f"Publisher {index}",
+                "url": f"https://publisher{index}.com/pax-silica",
+            }
+            for index in range(1, 3)
+        ]
+        research = {
+            "sources": sources,
+            "insufficient": None,
+            "trend": False,
+            "analysis": False,
+            "prefix": "",
+            "source_ids": ["pax-1", "pax-2"],
+            "trend_ids": [],
+        }
+
+        with (
+            patch.object(main, "_research_context", return_value=research),
+            patch.object(ai, "_need_client") as need_client,
+            patch.object(ai, "chat_stream") as chat_stream,
+            patch.object(main, "_save_turn", return_value="conversation-1"),
+        ):
+            response = main.chat(body, uid=None, stream=True)
+            events = asyncio.run(self._collect_stream_events(response))
+
+        done = json.loads(events[-1].removeprefix("data: ").strip())
+        self.assertIn(
+            "I found 2 relevant trusted sources about Pax Silica (4 requested)",
+            done["reply"],
+        )
+        self.assertIn("https://publisher1.com/pax-silica", done["reply"])
+        self.assertIn("https://publisher2.com/pax-silica", done["reply"])
+        self.assertNotIn("]([https://", done["reply"])
+        need_client.assert_not_called()
+        chat_stream.assert_not_called()
+        self.assertTrue(main._is_source_list_only_request(
+            "Give me at least 4 links related to Pax Silica"
+        ))
+        self.assertFalse(main._is_source_list_only_request(
+            "Give me 4 links and explain what Pax Silica is"
+        ))
+
+    def test_complete_source_lists_are_cached_for_repeat_requests(self):
+        prompt = "List 4 sources about orbital basalt cache speed check"
+        sources = [
+            {"id": f"cached-{index}", "url": f"https://source{index}.example/story"}
+            for index in range(4)
+        ]
+
+        main._cache_source_list(prompt, sources)
+
+        cached = main._cached_source_list_context(
+            "Give me 4 links related to orbital basalt cache speed check"
+        )
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["source_ids"], [f"cached-{index}" for index in range(4)])
+        self.assertIsNone(main._cached_source_list_context(
+            "Give me 5 links related to orbital basalt cache speed check"
+        ))
+
+    def test_repeat_source_request_uses_cached_results_without_live_research(self):
+        prompt = "List 4 sources about lunar basalt speed validation"
+        alternate_prompt = "Give me 4 links about lunar basalt speed validation"
+        sources = [
+            {
+                "id": f"lunar-{index}",
+                "title": f"Lunar basalt report {index}",
+                "source": f"Publisher {index}",
+                "url": f"https://publisher{index}.example/lunar-basalt",
+            }
+            for index in range(1, 5)
+        ]
+        research = {
+            "sources": sources,
+            "insufficient": None,
+            "trend": False,
+            "analysis": False,
+            "prefix": "",
+            "source_ids": [source["id"] for source in sources],
+            "trend_ids": [],
+        }
+
+        with (
+            patch.object(main, "_research_context", return_value=research) as search,
+            patch.object(main, "_save_turn", return_value="conversation-1"),
+        ):
+            first = main.chat(main.ChatIn(messages=[
+                main.Msg(role="user", content=prompt)
+            ]), uid=None, stream=True)
+            asyncio.run(self._collect_stream_events(first))
+
+        with (
+            patch.object(main, "_research_context") as search,
+            patch.object(main, "_save_turn", return_value="conversation-2"),
+        ):
+            second = main.chat(main.ChatIn(messages=[
+                main.Msg(role="user", content=alternate_prompt)
+            ]), uid=None, stream=True)
+            events = asyncio.run(self._collect_stream_events(second))
+
+        search.assert_not_called()
+        done = json.loads(events[-1].removeprefix("data: ").strip())
+        self.assertIn("https://publisher4.example/lunar-basalt", done["reply"])
+
+    @staticmethod
+    async def _collect_stream_events(response):
+        return [
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            async for chunk in response.body_iterator
+        ]
 
     def test_chat_upload_uses_multimodal_model_and_does_not_return_upload(self):
         uploaded = UploadFile(

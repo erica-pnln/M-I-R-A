@@ -42,6 +42,16 @@ class AskStoryTests(unittest.TestCase):
         self.assertNotIn("primary/hf", [model.model for model in available])
         self.assertIn("fallback/hf-one", [model.model for model in available])
 
+    def test_invalid_request_cooldown_is_task_scoped_and_keeps_only_model_usable(self):
+        model = ask_story.AskStoryModel(
+            "test", "text-model", "key", "https://example.test/v1",
+            ("story_chat", "story_explanation"),
+        )
+        ask_story._record_health(model, "invalid_request", 400, task="story_chat")
+        with patch.object(ask_story, "configured_models", return_value=[model]):
+            self.assertEqual(ask_story.models_for_task("story_chat"), [model])
+            self.assertEqual(ask_story.models_for_task("story_explanation"), [model])
+
     def test_task_classification(self):
         self.assertEqual(
             ask_story.classify_task("Write a complete article about this story"),
@@ -124,6 +134,61 @@ class AskStoryTests(unittest.TestCase):
                 )
 
         self.assertEqual(raised.exception.category, "providers_unavailable")
+
+    def test_stream_continues_partial_answer_with_fallback_model(self):
+        first = ask_story.AskStoryModel(
+            "test", "broken-model", "key", "https://example.test/v1",
+            ("story_chat",),
+        )
+        fallback = ask_story.AskStoryModel(
+            "test", "fallback-model", "key", "https://example.test/v1",
+            ("story_chat",),
+        )
+        rejected = ask_story.AskStoryFailure(
+            "invalid_request", "Provider rejected the request (HTTP 400).",
+            status_code=400,
+        )
+
+        class FakeResponse:
+            is_error = False
+
+            def __init__(self, *, partial=False):
+                self.partial = partial
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_lines(self):
+                if self.partial:
+                    yield 'data: {"choices":[{"delta":{"content":"The lead "}}]}'
+                    raise rejected
+                yield 'data: {"choices":[{"delta":{"content":"Next point."}}]}'
+                yield "data: [DONE]"
+
+        responses = [FakeResponse(partial=True), FakeResponse()]
+        messages = [{"role": "user", "content": "Explain the inverted pyramid."}]
+        with (
+            patch.object(ask_story, "models_for_task", return_value=[first, fallback]),
+            patch.object(ask_story, "sb", None),
+            patch.object(
+                ask_story.httpx, "stream", side_effect=responses
+            ) as stream_request,
+        ):
+            result = list(ask_story.generate_stream(
+                messages, "System", task="story_chat", article_id="story-id"
+            ))
+
+        self.assertEqual(
+            result,
+            [("The lead ", first.model), ("Next point.", fallback.model)],
+        )
+        fallback_messages = stream_request.call_args_list[1].kwargs["json"]["messages"]
+        self.assertEqual(fallback_messages[-2]["role"], "assistant")
+        self.assertIn("The lead", fallback_messages[-2]["content"])
+        self.assertIn("Continue the answer", fallback_messages[-1]["content"])
 
     def test_authentication_error_does_not_fall_back(self):
         failure = ask_story.AskStoryFailure(

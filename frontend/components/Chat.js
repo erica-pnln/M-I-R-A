@@ -4,18 +4,49 @@ import { apiStream } from "@/lib/api";
 import { useLanguage } from "@/components/LanguageProvider";
 
 const TRUSTED_IMAGE_HOSTS = [
+  "abs-cbn.com",
   "aljazeera.com",
+  "apnews.com",
   "assettype.com",
+  "ateneo.edu",
   "bbci.co.uk",
   "bbc.com",
+  "bworldonline.com",
+  "cnn.com",
+  "da.gov.ph",
+  "dbm.gov.ph",
+  "dof.gov.ph",
   "dw.com",
+  "eeas.europa.eu",
+  "espncdn.com",
   "fbcdn.net",
   "france24.com",
+  "foxweather.com",
   "gmanews.tv",
+  "googleusercontent.com",
   "guim.co.uk",
+  "immigration.gov.ph",
   "inquirer.net",
+  "irri.org",
+  "jamonline.ph",
+  "jpost.com",
+  "manilastandard.net",
+  "manilatimes.net",
+  "mediacorp.sg",
+  "mindanaotimes.com.ph",
+  "mongabay.com",
+  "philstar.com",
+  "pff.org.ph",
+  "pia.gov.ph",
+  "pna.gov.ph",
+  "ptvnews.ph",
   "rappler.com",
+  "thestar.com.my",
   "wixstatic.com",
+  "youtube.com",
+  "ytimg.com",
+  "ph.usembassy.gov",
+  "dzrh-bucket.s3.ap-southeast-1.amazonaws.com",
 ];
 
 function isTrustedImageUrl(value) {
@@ -141,7 +172,7 @@ function LocalImagePreview({ file, className = "", t }) {
   );
 }
 
-function FormattedMessage({ content, messageIndex, t }) {
+function FormattedMessage({ content, messageIndex, compactSourceCards, t }) {
   const sourceScope = messageIndex ?? 0;
   const visibleContent = content
     .replace(/<!--MIRA_RESEARCH:[A-Za-z0-9_-]+-->/g, "")
@@ -177,7 +208,9 @@ function FormattedMessage({ content, messageIndex, t }) {
         <List
           key={`list-${blocks.length}`}
           className={sourceList
-            ? "my-3 grid grid-cols-1 items-stretch gap-3 pl-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+            ? compactSourceCards
+              ? "my-3 grid grid-cols-1 items-stretch gap-3 pl-0"
+              : "my-3 grid grid-cols-1 items-stretch gap-3 pl-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
             : `my-2 space-y-1 pl-5 ${listType === "ordered" ? "list-decimal" : "list-disc"}`}
         >
           {list.map((item, index) => {
@@ -187,7 +220,7 @@ function FormattedMessage({ content, messageIndex, t }) {
                 key={index}
                 id={sourceId ? `source-${sourceScope}-${sourceId}` : undefined}
                 className={sourceList
-                  ? "flex aspect-square min-w-0 list-none flex-col gap-2 overflow-hidden rounded-xl border border-white/10 bg-white/[.03] p-3 transition-colors hover:border-mira-blue-light hover:bg-white/[.05]"
+                  ? "flex min-h-48 min-w-0 list-none flex-col gap-2 overflow-hidden rounded-xl border border-white/10 bg-white/[.03] p-3 transition-colors hover:border-mira-blue-light hover:bg-white/[.05]"
                   : ""}
               >
                 {renderInline(
@@ -279,6 +312,7 @@ export default function Chat({
   const [msgs, setMsgs] = useState(initialMessages);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
   const [conv, setConv] = useState(initialConversationId);
   const [files, setFiles] = useState([]);
   const box = useRef(null);
@@ -309,6 +343,7 @@ export default function Chat({
     setFiles([]);
     if (fileInput.current) fileInput.current.value = "";
     setBusy(true);
+    setProgress(t("MIRA is analysing…"));
     let partialReply = "";
     try {
       const messagePayload = next.map(({ role, content }) => ({ role, content }));
@@ -334,8 +369,10 @@ export default function Chat({
         body: requestBody,
         onToken: (token) => {
           partialReply += token;
+          setProgress(t("MIRA is typing…"));
           setMsgs([...next, { role: "assistant", content: partialReply }]);
         },
+        onStatus: (status) => setProgress(t(status)),
       });
       setConv(res.conversation_id);
       setMsgs([...next, { role: "assistant", content: res.reply }]);
@@ -349,7 +386,10 @@ export default function Chat({
         ? `${partialReply}\n\n*${t("The response stopped before it finished: {message}", { message: friendly })}*`
         : t("Sorry, I couldn’t answer: {message}", { message: friendly });
       setMsgs([...next, { role: "assistant", content: message }]);
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+      setProgress("");
+    }
   }
 
   return (
@@ -368,7 +408,12 @@ export default function Chat({
             ? "self-end border border-white/20 bg-mira-blue/40"
             : "self-start border border-white/15 bg-white/[.06]"}`}>
             {m.role === "assistant"
-              ? <FormattedMessage content={m.content} messageIndex={i} t={t} />
+              ? <FormattedMessage
+                  content={m.content}
+                  messageIndex={i}
+                  compactSourceCards={endpoint === "/api/ask"}
+                  t={t}
+                />
               : m.content}
             {m.attachments?.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2 border-t border-white/15 pt-2">
@@ -383,13 +428,13 @@ export default function Chat({
             )}
           </div>
         ))}
-        {busy && msgs[msgs.length - 1]?.role !== "assistant" && (
+        {busy && (
           <div
             role="status"
             aria-live="polite"
             className="self-start max-w-[90%] animate-pulse rounded-2xl border border-white/15 bg-white/[.06] px-4 py-2.5 text-sm text-white/75"
           >
-            {t("MIRA's analyzing")}
+            {progress || t("MIRA is analysing…")}
           </div>
         )}
       </div>

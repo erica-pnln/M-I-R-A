@@ -361,6 +361,9 @@ def _generate_external_content(
                 fallback_attempt += 1
                 last_error = exc
                 if exc.category == "invalid_request":
+                    providers.record_health(
+                        providers.task_cooldown_key(spec, task), healthy=False
+                    )
                     provider_unavailable = True
                     break
                 if not exc.retryable:
@@ -390,12 +393,14 @@ def _generate_external_stream(
         provider_unavailable = False
         for retry in range(max_retries + 1):
             emitted = False
+            emitted_parts = []
             try:
                 for text in providers.generate_stream(
                     spec, contents, _system_instruction(config), config
                 ):
                     if text:
                         emitted = True
+                        emitted_parts.append(text)
                         yield text
                 providers.record_health(spec.key, healthy=True)
                 providers.log_attempt(
@@ -419,8 +424,27 @@ def _generate_external_stream(
                 state["fallback_attempt"] += 1
                 state["last_error"] = exc
                 if emitted:
-                    raise AIUnavailable(str(exc)) from exc
+                    logger.warning(
+                        "AI provider %s model %s failed after streaming output; "
+                        "continuing with another configured model",
+                        spec.provider,
+                        spec.model,
+                    )
+                    providers.record_health(
+                        providers.task_cooldown_key(spec, task)
+                        if exc.category == "invalid_request" else spec.key,
+                        healthy=False,
+                    )
+                    contents = _continued_chat_contents(
+                        contents, "".join(emitted_parts)
+                    )
+                    state["contents"] = contents
+                    provider_unavailable = True
+                    break
                 if exc.category == "invalid_request":
+                    providers.record_health(
+                        providers.task_cooldown_key(spec, task), healthy=False
+                    )
                     provider_unavailable = True
                     break
                 if not exc.retryable:
@@ -623,6 +647,8 @@ def _generate_content_stream(
         )
         if external_state["completed"]:
             return
+        contents = external_state.get("contents", contents)
+        original_contents = contents
         fallback_attempt = external_state["fallback_attempt"]
         last_error = external_state["last_error"]
     for candidate in models:
@@ -1032,6 +1058,10 @@ def append_source_references(
             f"  [Read original source: {source.get('title', '')} — "
             f"{source.get('source', '')}]({source.get('url', '')})"
         )
+        if source.get("retrieval_origin") == "captured":
+            references.append("  *Source status: Captured by MIRA*")
+        elif source.get("retrieval_origin") == "external":
+            references.append("  *Source status: Newly retrieved externally*")
     if not references:
         return reply
     return (

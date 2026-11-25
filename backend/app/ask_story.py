@@ -8,6 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Iterator
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -203,18 +204,31 @@ def _is_cooling_down(key: str) -> bool:
         return True
 
 
-def _record_health(spec: AskStoryModel, category: str, status_code: int | None) -> None:
+def _record_health(
+    spec: AskStoryModel,
+    category: str,
+    status_code: int | None,
+    *,
+    task: str | None = None,
+) -> None:
     with _health_lock:
         retry_after = None
         if status_code:
             retry_after = os.getenv("ASK_STORY_PROVIDER_COOLDOWN_SECONDS")
         cooldown = float(retry_after or (120 if category == "quota_exhausted" else 60))
-        _cooldowns[spec.key] = time.monotonic() + max(1, cooldown)
+        key = (
+            _task_cooldown_key(spec, task)
+            if task and category == "invalid_request"
+            else spec.key
+        )
+        _cooldowns[key] = time.monotonic() + max(1, cooldown)
 
 
-def _mark_healthy(spec: AskStoryModel) -> None:
+def _mark_healthy(spec: AskStoryModel, *, task: str | None = None) -> None:
     with _health_lock:
         _cooldowns.pop(spec.key, None)
+        if task:
+            _cooldowns.pop(_task_cooldown_key(spec, task), None)
 
 
 def health() -> list[dict]:
@@ -365,10 +379,19 @@ def _cache_put(key: str, value: str) -> None:
 
 
 def models_for_task(task: str) -> list[AskStoryModel]:
-    return [
+    compatible = [
         spec for spec in configured_models()
         if task in spec.tasks and not _is_cooling_down(spec.key)
     ]
+    task_ready = [
+        spec for spec in compatible
+        if not _is_cooling_down(_task_cooldown_key(spec, task))
+    ]
+    return task_ready or compatible
+
+
+def _task_cooldown_key(spec: AskStoryModel, task: str) -> str:
+    return f"{spec.key}:{task}"
 
 
 def story_system(
@@ -458,12 +481,35 @@ def append_sources(
     source_ids = valid_ids if include_all_sources else cited & valid_ids
     for index in sorted(source_ids):
         source = sources[index - 1]
+        source_url = str(source.get("url") or "").strip()
+        try:
+            url_parts = urlsplit(source_url)
+        except ValueError:
+            continue
+        if url_parts.scheme.lower() != "https" or not url_parts.netloc:
+            continue
+        markdown_url = source_url.replace("(", "%28").replace(")", "%29")
+        title = str(source.get("title") or "Read original source").strip()
+        publisher = str(
+            source.get("source") or source.get("domain") or "Publisher"
+        ).strip()
         published = source.get("published")
         date_label = f", {published}" if published else ""
+        references.append(f"- [S{index}]")
+        image_url = source.get("image") or source.get("image_url")
+        if isinstance(image_url, str) and image_url.startswith("https://"):
+            image_alt = title.replace("[", "(").replace("]", ")")
+            references.append(
+                f"  ![{image_alt} thumbnail]"
+                f"({image_url.replace('(', '%28').replace(')', '%29')})"
+            )
         references.append(
-            f"- [S{index}] [{source.get('title', 'Read original source')} — "
-            f"{source.get('source', 'publisher')}{date_label}]({source.get('url', '')})"
+            f"  [{title} — {publisher}{date_label}]({markdown_url})"
         )
+        if source.get("retrieval_origin") == "captured":
+            references.append("  *Source status: Captured by MIRA*")
+        elif source.get("retrieval_origin") == "external":
+            references.append("  *Source status: Newly retrieved externally*")
     if references:
         reply = re.sub(r"\n{3,}", "\n\n", reply).strip()
         reply += "\n\n### Sources\n" + "\n".join(references)
@@ -530,7 +576,7 @@ def generate(
                     raise AskStoryFailure("invalid_response", "Ask Story returned an empty response.")
                 usage = payload.get("usage") or {}
                 elapsed = int((time.monotonic() - started) * 1000)
-                _mark_healthy(spec)
+                _mark_healthy(spec, task=task)
                 _log_usage(
                     request_id=request_id,
                     spec=spec,
@@ -549,7 +595,9 @@ def generate(
             except AskStoryFailure as exc:
                 elapsed = int((time.monotonic() - attempt_started) * 1000)
                 if exc.retryable or exc.category == "invalid_request":
-                    _record_health(spec, exc.category, exc.status_code)
+                    _record_health(
+                        spec, exc.category, exc.status_code, task=task
+                    )
                 _log_usage(
                     request_id=request_id,
                     spec=spec,
@@ -585,7 +633,7 @@ def generate(
                     f"{spec.provider} ({spec.model}): temporary network failure"
                 )
                 _record_health(
-                    spec, last_error.category, last_error.status_code
+                    spec, last_error.category, last_error.status_code, task=task
                 )
                 _log_usage(
                     request_id=request_id,
@@ -642,6 +690,7 @@ def generate_stream(
 
     for fallback_attempt, spec in enumerate(candidates):
         yielded_token = False
+        emitted_parts = []
         try:
             with httpx.stream(
                 "POST",
@@ -672,10 +721,11 @@ def generate_stream(
                     if isinstance(delta, str) and delta:
                         yielded_token = True
                         saw_token = True
+                        emitted_parts.append(delta)
                         yield delta, spec.model
                 if not saw_token:
                     raise AskStoryFailure("invalid_response", "Ask Story returned an empty stream.")
-                _mark_healthy(spec)
+                _mark_healthy(spec, task=task)
                 _log_usage(
                     request_id=request_id,
                     spec=spec,
@@ -690,8 +740,10 @@ def generate_stream(
                 )
                 return
         except AskStoryFailure as exc:
-            if exc.retryable:
-                _record_health(spec, exc.category, exc.status_code)
+            if exc.retryable or exc.category == "invalid_request":
+                _record_health(
+                    spec, exc.category, exc.status_code, task=task
+                )
             _log_usage(
                 request_id=request_id,
                 spec=spec,
@@ -709,7 +761,18 @@ def generate_stream(
                 + (f" HTTP {exc.status_code}" if exc.status_code else "")
             )
             if yielded_token:
-                raise
+                messages = [
+                    *messages,
+                    {"role": "assistant", "content": "".join(emitted_parts)},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Continue the answer where it stopped. "
+                            "Do not repeat completed text."
+                        ),
+                    },
+                ]
+                continue
             if exc.category in ("authentication", "invalid_response"):
                 raise
             continue
@@ -719,7 +782,9 @@ def generate_stream(
                 "Ask Story request timed out or could not connect.",
                 retryable=True,
             )
-            _record_health(spec, failure.category, failure.status_code)
+            _record_health(
+                spec, failure.category, failure.status_code, task=task
+            )
             _log_usage(
                 request_id=request_id,
                 spec=spec,

@@ -1,3 +1,4 @@
+import atexit
 import base64
 import json
 import logging
@@ -18,7 +19,29 @@ logger = logging.getLogger(__name__)
 _health_lock = threading.Lock()
 _cooldowns: dict[str, float] = {}
 _TIMEOUT_SECONDS = max(1.0, float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "30")))
+_http_client_lock = threading.Lock()
+_http_client: httpx.Client | None = None
 _usage_schema_warning_logged = False
+
+
+def _get_http_client() -> httpx.Client:
+    global _http_client
+    with _http_client_lock:
+        if _http_client is None:
+            _http_client = httpx.Client()
+        return _http_client
+
+
+def close_http_client() -> None:
+    global _http_client
+    with _http_client_lock:
+        client = _http_client
+        _http_client = None
+    if client is not None:
+        client.close()
+
+
+atexit.register(close_http_client)
 
 
 class ProviderFailure(RuntimeError):
@@ -238,12 +261,21 @@ def supports_input(spec: ModelSpec, contents) -> bool:
 
 
 def models_for(task: str, contents) -> list[ModelSpec]:
-    return [
+    compatible = [
         spec for spec in configured_models()
         if (task in spec.tasks or "*" in spec.tasks)
         and supports_input(spec, contents)
         and not is_cooling_down(spec.key)
     ]
+    task_ready = [
+        spec for spec in compatible
+        if not is_cooling_down(task_cooldown_key(spec, task))
+    ]
+    return task_ready or compatible
+
+
+def task_cooldown_key(spec: ModelSpec, task: str) -> str:
+    return f"{spec.key}:{task}"
 
 
 def _openai_messages(contents, system: str) -> list[dict]:
@@ -318,7 +350,7 @@ def _request_body(spec: ModelSpec, contents, system: str, config) -> dict:
 def generate(spec: ModelSpec, contents, system: str, config) -> tuple[str, dict]:
     url = f"{spec.base_url}/chat/completions"
     try:
-        response = httpx.post(
+        response = _get_http_client().post(
             url,
             headers={"Authorization": f"Bearer {spec.api_key}"},
             json=_request_body(spec, contents, system, config),
@@ -359,7 +391,7 @@ def generate_stream(
     body = _request_body(spec, contents, system, config)
     body["stream"] = True
     try:
-        with httpx.stream(
+        with _get_http_client().stream(
             "POST",
             url,
             headers={"Authorization": f"Bearer {spec.api_key}"},

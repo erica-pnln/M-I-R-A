@@ -8,6 +8,7 @@ import logging
 import math
 import re
 import threading
+import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import PurePath
@@ -33,6 +34,9 @@ from .media_sources import (
 
 app = FastAPI(title="MIRA API", version="0.1.0")
 logger = logging.getLogger(__name__)
+_SOURCE_LIST_CACHE_TTL = 60.0
+_SOURCE_LIST_CACHE: dict[tuple[str, int], tuple[float, list[dict]]] = {}
+_SOURCE_LIST_CACHE_LOCK = threading.Lock()
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 _TRUSTED_NEWS_DOMAINS = {
@@ -50,17 +54,27 @@ _TRUSTED_NEWS_DOMAINS = {
     "reuters.com",
     "theguardian.com",
 }
+_CHAT_SOURCE_SEARCH_PAGE_SIZE = 20
+_CHAT_SOURCE_SEARCH_MAX_RESULTS = 100
+_PHILIPPINE_NEWS_CONTEXT = re.compile(
+    r"\b(?:philippines|philippine|pilipinas|manila|filipino|duterte|eala|"
+    r"caraga|mindanao|luzon|visayas|npa)\b",
+    re.IGNORECASE,
+)
 _RESEARCH_CONTEXT_MARKER = re.compile(r"<!--MIRA_RESEARCH:([A-Za-z0-9_-]+)-->")
 _RESEARCH_QUERY_NOISE = {
     "about", "affect", "are", "breaking", "can", "could", "current", "find",
     "describe", "explain", "fresh", "freshest", "give", "happen", "happening",
     "help", "important", "last", "latest", "make", "me", "month", "most", "need",
-    "new", "newest", "news", "now", "number", "of", "past", "please", "recent",
-    "recently", "right", "show", "stories", "story", "tell", "the", "this", "today",
+    "new", "newest", "news", "now", "number", "of", "past", "please", "provide",
+    "recent", "recently", "right", "share", "show", "list", "stories", "story",
+    "tell", "the", "this", "today",
+    "reports", "issue", "issues", "article", "articles",
     "top", "trend", "trending", "trends", "want", "week", "what", "whats", "why",
     "with", "would", "year", "yesterday", "you", "at", "least", "many", "more",
     "needed", "related", "topic", "sources", "source", "links", "citations",
-    "references", "image", "images", "identify", "analysis", "analyze", "describe",
+    "references", "evidence", "supporting", "article", "articles",
+    "image", "images", "identify", "analysis", "analyze", "describe",
     "5ws", "1h", "one", "two", "three", "four", "five", "six", "seven", "eight",
     "nine", "ten",
 }
@@ -72,7 +86,21 @@ _ASSISTANT_TOPIC_NOISE = {
     "when", "where", "why", "how",
 }
 _SOURCE_LIST_REQUEST = re.compile(
-    r"\b(?:sources?|citations?|references?|links?)\b",
+    r"\b(?:sources?|citations?|references?|links?|evidence|"
+    r"(?:related|supporting)\s+articles?)\b",
+    re.IGNORECASE,
+)
+_ASK_STORY_SOURCE_CACHE_TTL = 60.0
+_ASK_STORY_SOURCE_CACHE: dict[tuple[str, str, int], tuple[float, list[dict]]] = {}
+_ASK_STORY_SOURCE_CACHE_LOCK = threading.Lock()
+_SOURCE_LIST_ACTION = re.compile(
+    r"\b(?:give|find|list|show|provid(?:e|ing)|share|retrieve|get)\b",
+    re.IGNORECASE,
+)
+_SOURCE_LIST_EXTRA_TASK = re.compile(
+    r"\b(?:analy[sz]e|assess|background|compare|context|describe|discuss|"
+    r"explain|fact[- ]?check|how|overview|summar(?:y|ize|ise)|tell|verify|"
+    r"what|when|where|who|why|write|draft)\b",
     re.IGNORECASE,
 )
 _RESEARCH_TOPICS = {
@@ -113,6 +141,15 @@ _LIVE_RESEARCH_REQUEST = re.compile(
     r"\b(?:latest|current|today|yesterday|recent|news|reported|reporting|"
     r"source|sources|fact[- ]?check|verify|claim|evidence|what happened|"
     r"what(?:'s| is) happening)\b",
+    re.IGNORECASE,
+)
+_ARCHIVE_RESEARCH_REQUEST = re.compile(
+    r"\b(?:research|investigate|report|compare|sources?|citations?|"
+    r"fact[- ]?check|verify|evidence)\b",
+    re.IGNORECASE,
+)
+_GENERAL_KNOWLEDGE_QUESTION = re.compile(
+    r"^\s*(?:what|who|where|when|why|how)\b",
     re.IGNORECASE,
 )
 _NON_RESEARCH_CHAT = {"hello", "hey", "hi", "thanks", "thank", "okay", "ok", "bye"}
@@ -486,6 +523,9 @@ def _stream_chat_response(
     project_id: str | None = None,
     uploads_retained: bool | None = None,
     research: dict | None = None,
+    prepare=None,
+    initial_status: str | None = None,
+    prepared_status: str = "Writing your response…",
 ):
     def event(data: dict) -> str:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -493,35 +533,55 @@ def _stream_chat_response(
     def generate():
         response_parts = []
         try:
+            response_chunks = chunks
+            response_sources = sources
+            response_research = research
+            if prepare:
+                if initial_status:
+                    yield event({"type": "status", "text": initial_status})
+                response_chunks, response_sources, response_research = prepare()
+                yield event({"type": "status", "text": prepared_status})
+
             prefix = ""
-            if research:
-                prefix = research.get("article_prefix", "") + research.get("prefix", "")
+            direct_intro = ""
+            if response_research:
+                prefix = (
+                    response_research.get("article_prefix", "")
+                    + response_research.get("prefix", "")
+                )
+                if response_research.get("source_list_only"):
+                    direct_intro = _source_list_intro(
+                        user_message, response_sources
+                    )
+                    yield event({"type": "token", "text": direct_intro})
             if prefix:
                 yield event({"type": "token", "text": prefix + "\n\n"})
-            for chunk in chunks:
+            for chunk in response_chunks:
                 response_parts.append(chunk)
                 yield event({"type": "token", "text": chunk})
 
             response_text = "".join(response_parts)
+            if direct_intro:
+                response_text = f"{direct_intro}\n\n{response_text}".strip()
             if prefix:
                 response_text = f"{prefix}\n\n{response_text}".strip()
             reply = (
                 _append_research_source_references(
                     response_text,
-                    sources,
+                    response_sources,
                     include_all_sources=bool(
-                        research.get("include_all_sources")
+                        response_research.get("include_all_sources")
                     ),
                 )
-                if research else ai.append_source_references(
-                    response_text, sources, article
+                if response_research else ai.append_source_references(
+                    response_text, response_sources, article
                 )
             )
-            if research:
+            if response_research:
                 reply = _with_research_context(
                     reply,
-                    research.get("source_ids", []),
-                    research.get("trend_ids", []),
+                    response_research.get("source_ids", []),
+                    response_research.get("trend_ids", []),
                 )
             saved_conversation_id = _save_turn(
                 uid,
@@ -699,18 +759,71 @@ def _rank_chat_sources(
     relevant_tokens = set(intelligence._tokens(corrected_query or query))
     minimum_matches = min(2, len(relevant_tokens))
     sources = []
+    seen_publishers = set()
     for article in ranked:
         article_tokens = set(intelligence._tokens(
             f"{article.get('title') or ''} {article.get('summary') or ''}"
         ))
-        if len(relevant_tokens & article_tokens) >= minimum_matches:
-            sources.append(article)
-            if len(sources) >= limit:
-                break
+        if len(relevant_tokens & article_tokens) < minimum_matches:
+            continue
+        publisher = _trusted_news_domain(article.get("url", ""))
+        if not publisher or publisher in seen_publishers:
+            continue
+        seen_publishers.add(publisher)
+        sources.append(article)
+        if len(sources) >= limit:
+            break
     return sources
 
 
-def _trusted_search_articles(articles: list[dict]) -> list[dict]:
+def _rank_source_list(
+    query: str, articles: list[dict], limit: int,
+) -> list[dict]:
+    """Rank source-list results without rebuilding the full BM25 article index."""
+    query_terms = set(intelligence._tokens(query))
+    if not query_terms:
+        return []
+
+    required_matches = min(2, len(query_terms))
+    ranked = []
+    seen_articles = set()
+    for article in articles:
+        if not _is_trusted_news_article(article):
+            continue
+        article_key = str(article.get("id") or article.get("url") or "")
+        if not article_key or article_key in seen_articles:
+            continue
+        seen_articles.add(article_key)
+        title_terms = set(intelligence._tokens(str(article.get("title") or "")))
+        summary_terms = set(intelligence._tokens(str(
+            article.get("summary") or article.get("description") or ""
+        )))
+        matches = query_terms & (title_terms | summary_terms)
+        if len(matches) < required_matches:
+            continue
+        score = len(query_terms & title_terms) * 3 + len(query_terms & summary_terms)
+        ranked.append((score, article))
+
+    distinct_publishers = []
+    repeat_publishers = []
+    seen_publishers = set()
+    for _score, article in sorted(ranked, key=lambda item: item[0], reverse=True):
+        publisher = _trusted_news_domain(article.get("url", ""))
+        if not publisher:
+            continue
+        if publisher in seen_publishers:
+            repeat_publishers.append(article)
+            continue
+        seen_publishers.add(publisher)
+        distinct_publishers.append(article)
+    return (distinct_publishers + repeat_publishers)[:limit]
+
+
+def _trusted_search_articles(
+    articles: list[dict],
+    *,
+    resolve_timeout: float = 20.0,
+) -> list[dict]:
     google_urls = [
         str(article.get("url") or "")
         for article in articles
@@ -719,8 +832,11 @@ def _trusted_search_articles(articles: list[dict]) -> list[dict]:
     google_urls = [
         url for url in google_urls
         if news._google_article_id(url)
-    ][:10]
-    decoded_urls = news._decode_google_news_urls(google_urls)
+    ][:_CHAT_SOURCE_SEARCH_PAGE_SIZE]
+    decoded_urls = news._decode_google_news_urls(
+        google_urls,
+        timeout=resolve_timeout,
+    )
     trusted = []
     for article in articles:
         result = dict(article)
@@ -730,20 +846,78 @@ def _trusted_search_articles(articles: list[dict]) -> list[dict]:
             result["url"] = resolved_url
             result["canonical_url"] = news._canonical_url(resolved_url)
         if _is_trusted_news_article(result):
+            result["retrieval_origin"] = "external"
             trusted.append(result)
     return trusted
 
 
-def _is_trusted_news_article(article: dict) -> bool:
+def _trusted_news_domain(url: str) -> str | None:
     try:
-        parts = urlsplit(article.get("url", ""))
+        parts = urlsplit(url)
         hostname = (parts.hostname or "").lower().rstrip(".")
     except (TypeError, ValueError):
-        return False
-    return parts.scheme.lower() == "https" and any(
-        hostname == domain or hostname.endswith(f".{domain}")
-        for domain in _TRUSTED_NEWS_DOMAINS
+        return None
+    if parts.scheme.lower() != "https":
+        return None
+    for domain in _TRUSTED_NEWS_DOMAINS:
+        if hostname == domain or hostname.endswith(f".{domain}"):
+            return "bbc.com" if domain == "bbc.co.uk" else domain
+    return None
+
+
+def _discover_chat_sources(
+    query: str, stored_sources: list[dict], limit: int,
+    *, fast_fallback: bool = False,
+) -> tuple[list[dict], bool]:
+    fallback_scope = (
+        "international"
+        if _PHILIPPINE_NEWS_CONTEXT.search(query)
+        else "philippines"
     )
+    candidates = []
+    sources = []
+    search_failed = False
+    page_size = 10 if fast_fallback else _CHAT_SOURCE_SEARCH_PAGE_SIZE
+    max_results = 40 if fast_fallback else _CHAT_SOURCE_SEARCH_MAX_RESULTS
+
+    for scope in ("all", fallback_scope):
+        offset = 0
+        while offset < max_results:
+            discovery = news.search_discovery(
+                query,
+                scope=scope,
+                period="all",
+                sort="relevance",
+                limit=page_size,
+                offset=offset,
+                timeout_seconds=2.0 if fast_fallback else 5.0,
+            )
+            search_failed = search_failed or bool(discovery.get("source_errors"))
+            page = discovery.get("articles") or []
+            candidates.extend(_trusted_search_articles(
+                page,
+                resolve_timeout=2.0 if fast_fallback else 20.0,
+            ))
+            sources = _rank_chat_sources(
+                query, [*stored_sources, *candidates], limit=limit
+            )
+            if len(sources) >= limit:
+                return sources, search_failed
+
+            next_offset = discovery.get("next_offset")
+            if (
+                not page
+                or not isinstance(next_offset, int)
+                or next_offset <= offset
+            ):
+                break
+            offset = next_offset
+
+    return sources, search_failed
+
+
+def _is_trusted_news_article(article: dict) -> bool:
+    return _trusted_news_domain(article.get("url", "")) is not None
 
 
 def _is_trusted_news_image(image_url: str) -> bool:
@@ -1235,20 +1409,76 @@ def _research_context(messages: list[dict], mode: str) -> dict:
     query_tokens = set(intelligence._tokens(query))
     live_search_failed = False
     sources = []
-    if query_tokens and not query_tokens.issubset(_NON_RESEARCH_CHAT):
-        stored_sources = _rank_chat_sources(
-            query, _retrieve(query, limit=20), limit=source_count
+    needs_research_context = (
+        bool(
+            _LIVE_RESEARCH_REQUEST.search(prompt)
+            or _ARCHIVE_RESEARCH_REQUEST.search(prompt)
+            or _ARTICLE_GENERATION_REQUEST.search(prompt)
+            or mode in {"article_generation", "media_review"}
         )
+        or bool(
+            previous.get("sources")
+            and _is_contextual_followup(prompt)
+        )
+        or (
+            not _GENERAL_KNOWLEDGE_QUESTION.search(prompt)
+            and not query_tokens.issubset(_NON_RESEARCH_CHAT)
+        )
+    )
+    if query_tokens and needs_research_context:
+        if source_list_only := _is_source_list_only_request(prompt):
+            stored_sources = [
+                {**source, "retrieval_origin": "captured"}
+                for source in _rank_source_list(
+                    query, list(news._cache["items"]), source_count
+                )
+            ]
+        else:
+            stored_sources = [
+                {**source, "retrieval_origin": "captured"}
+                for source in _rank_chat_sources(
+                    query, _retrieve(query, limit=20), limit=source_count
+                )
+            ]
         sources = stored_sources
-        if _LIVE_RESEARCH_REQUEST.search(prompt):
-            discovery = news.search_discovery(
-                query, scope="all", period="all", sort="relevance", limit=20,
+        if (
+            (
+                _LIVE_RESEARCH_REQUEST.search(prompt)
+                or source_list_only
             )
-            live_search_failed = bool(discovery.get("source_errors"))
-            discovered = _trusted_search_articles(discovery.get("articles") or [])
-            sources = _rank_chat_sources(
-                query, [*discovered, *stored_sources], limit=source_count
+            and (
+                not source_list_only
+                or len(stored_sources) < source_count
             )
+        ):
+            if source_list_only:
+                external = ask_story_research.external_sources(
+                    query,
+                    limit=source_count,
+                )
+                captured_urls = {
+                    news._canonical_url(source.get("url", "")) or source.get("url")
+                    for source in stored_sources
+                }
+                external = [
+                    source for source in external
+                    if (
+                        news._canonical_url(source.get("url", "")) or source.get("url")
+                    ) not in captured_urls
+                ]
+                sources = [
+                    *stored_sources,
+                    *[
+                        {**source, "retrieval_origin": "external"}
+                        for source in _rank_source_list(
+                            query, external, source_count - len(stored_sources)
+                        )
+                    ],
+                ]
+            else:
+                sources, live_search_failed = _discover_chat_sources(
+                    query, stored_sources, source_count
+                )
     if not sources and previous.get("sources") and _is_contextual_followup(prompt):
         articles_by_id = {
             str(article.get("id")): article
@@ -1271,6 +1501,155 @@ def _research_context(messages: list[dict], mode: str) -> dict:
         "live_search_failed": live_search_failed,
         "include_all_sources": bool(_SOURCE_LIST_REQUEST.search(prompt)),
     }
+
+
+def _is_source_list_only_request(prompt: str) -> bool:
+    return bool(
+        _SOURCE_LIST_REQUEST.search(prompt)
+        and _SOURCE_LIST_ACTION.search(prompt)
+        and not _SOURCE_LIST_EXTRA_TASK.search(prompt)
+    )
+
+
+def _source_list_intro(prompt: str, sources: list[dict]) -> str:
+    topic = _research_query(prompt) or "your topic"
+    topic = " ".join(
+        word if word.isupper() else word.capitalize()
+        for word in topic.split()
+    )
+    requested = ask_story_research.requested_source_count(prompt)
+    count = len(sources)
+    if not count:
+        return (
+            f"I couldn't retrieve any relevant trusted source links about {topic} "
+            "right now."
+        )
+    if count >= requested:
+        return f"Here are {count} relevant trusted sources about {topic}:"
+    noun = "source" if count == 1 else "sources"
+    return (
+        f"I found {count} relevant trusted {noun} about {topic} "
+        f"({requested} requested):"
+    )
+
+
+def _cache_source_list(prompt: str, sources: list[dict]) -> None:
+    requested = ask_story_research.requested_source_count(prompt)
+    if len(sources) < requested:
+        return
+    query = _research_query(prompt).casefold()
+    if not query:
+        return
+    key = (query, requested)
+    with _SOURCE_LIST_CACHE_LOCK:
+        if len(_SOURCE_LIST_CACHE) >= 128:
+            oldest = min(_SOURCE_LIST_CACHE, key=lambda item: _SOURCE_LIST_CACHE[item][0])
+            _SOURCE_LIST_CACHE.pop(oldest, None)
+        _SOURCE_LIST_CACHE[key] = (
+            time.monotonic(),
+            [dict(source) for source in sources[:requested]],
+        )
+
+
+def _cached_source_list_context(prompt: str) -> dict | None:
+    requested = ask_story_research.requested_source_count(prompt)
+    query = _research_query(prompt).casefold()
+    if not query:
+        return None
+    key = (query, requested)
+    now = time.monotonic()
+    with _SOURCE_LIST_CACHE_LOCK:
+        cached = _SOURCE_LIST_CACHE.get(key)
+        if not cached:
+            return None
+        if now - cached[0] >= _SOURCE_LIST_CACHE_TTL:
+            _SOURCE_LIST_CACHE.pop(key, None)
+            return None
+        sources = [dict(source) for source in cached[1]]
+    return {
+        "sources": sources,
+        "source_ids": [str(source["id"]) for source in sources],
+        "trend_ids": [],
+        "trend": False,
+        "analysis": False,
+        "prefix": "",
+        "insufficient": None,
+        "include_all_sources": True,
+    }
+
+
+def _ask_story_source_cache_key(article: dict, prompt: str, count: int):
+    topic = _research_query(prompt) or _research_query(
+        str(article.get("title") or "")
+    )
+    if not topic:
+        return None
+    return str(article.get("id") or ""), topic.casefold(), count
+
+
+def _cache_ask_story_sources(
+    article: dict, prompt: str, count: int, sources: list[dict],
+) -> None:
+    if len(sources) < count:
+        return
+    key = _ask_story_source_cache_key(article, prompt, count)
+    if not key:
+        return
+    with _ASK_STORY_SOURCE_CACHE_LOCK:
+        if len(_ASK_STORY_SOURCE_CACHE) >= 128:
+            oldest = min(
+                _ASK_STORY_SOURCE_CACHE,
+                key=lambda item: _ASK_STORY_SOURCE_CACHE[item][0],
+            )
+            _ASK_STORY_SOURCE_CACHE.pop(oldest, None)
+        _ASK_STORY_SOURCE_CACHE[key] = (
+            time.monotonic(),
+            [dict(source) for source in sources[:count]],
+        )
+
+
+def _cached_ask_story_sources(
+    article: dict, prompt: str, count: int,
+) -> list[dict] | None:
+    key = _ask_story_source_cache_key(article, prompt, count)
+    if not key:
+        return None
+    now = time.monotonic()
+    with _ASK_STORY_SOURCE_CACHE_LOCK:
+        cached = _ASK_STORY_SOURCE_CACHE.get(key)
+        if not cached:
+            return None
+        if now - cached[0] >= _ASK_STORY_SOURCE_CACHE_TTL:
+            _ASK_STORY_SOURCE_CACHE.pop(key, None)
+            return None
+        sources = [dict(source) for source in cached[1]]
+    relevant_sources = ask_story_research.related_sources(
+        article,
+        prompt,
+        sources,
+        limit=count,
+        allow_same_publisher=True,
+        require_requested_topics=True,
+    )
+    if len(relevant_sources) < count:
+        return None
+    return relevant_sources[:count]
+
+
+def _ask_story_source_intro(
+    article: dict, sources: list[dict], requested: int,
+) -> str:
+    title = str(article.get("title") or "this story").strip()
+    count = len(sources)
+    if not count:
+        return f"I couldn't retrieve relevant trusted sources for “{title}” right now."
+    if count >= requested:
+        return f"Here are {count} relevant supporting sources for “{title}”:"
+    noun = "source" if count == 1 else "sources"
+    return (
+        f"I found {count} relevant supporting {noun} for “{title}” "
+        f"({requested} requested):"
+    )
 
 
 def _upload_retrieval_query(prompt: str, files: list[dict]) -> str:
@@ -2042,41 +2421,89 @@ def chat(
     _validate_chat_targets(uid, body.conversation_id, body.project_id)
     mode = _requested_chat_mode(body.mode, msgs[-1]["content"])
     task = _chat_task(mode)
-    research = _research_context(msgs, mode)
-    sources = research["sources"]
-    system = (
-        _research_chat_system(mode, sources, research)
-        + "\n\n" + _ai_language_instruction(uid)
-    )
-    if mode == "article_generation" and sources:
-        research["article_prefix"] = _research_article_header(sources)
     model_messages = _messages_for_research_model(msgs)
-    chunks = iter(())
-    should_call_ai = (
-        not research["insufficient"]
-        and (not research["trend"] or research["analysis"])
-    )
-    if should_call_ai:
-        _ai_call(ai._need_client, task)
-        chunks = ai.chat_stream(model_messages, system, task) if stream else None
+    source_list_only = _is_source_list_only_request(msgs[-1]["content"])
     if stream:
+        def prepare_stream():
+            research = (
+                _cached_source_list_context(msgs[-1]["content"])
+                if source_list_only else None
+            )
+            if research is None:
+                research = _research_context(msgs, mode)
+                if source_list_only:
+                    _cache_source_list(
+                        msgs[-1]["content"], research["sources"]
+                    )
+            research["source_list_only"] = source_list_only
+            research["include_all_sources"] = bool(
+                source_list_only or research.get("include_all_sources")
+            )
+            sources = research["sources"]
+            should_call_ai = (
+                not research["insufficient"]
+                and (not research["trend"] or research["analysis"])
+                and not source_list_only
+            )
+            chunks = iter(())
+            if should_call_ai:
+                system = (
+                    _research_chat_system(mode, sources, research)
+                    + "\n\n" + _ai_language_instruction(uid)
+                )
+                if mode == "article_generation" and sources:
+                    research["article_prefix"] = _research_article_header(sources)
+                _ai_call(ai._need_client, task)
+                chunks = ai.chat_stream(model_messages, system, task)
+            return chunks, sources, research
+
         return _stream_chat_response(
-            chunks,
-            sources,
+            iter(()),
+            [],
             uid,
             body.conversation_id,
             "chat",
             None,
             msgs[-1]["content"],
             project_id=body.project_id,
-            research=research,
+            prepare=prepare_stream,
+            initial_status="MIRA is analysing…",
+            prepared_status="MIRA is typing…",
         )
+    research = (
+        _cached_source_list_context(msgs[-1]["content"])
+        if source_list_only else None
+    )
+    if research is None:
+        research = _research_context(msgs, mode)
+        if source_list_only:
+            _cache_source_list(msgs[-1]["content"], research["sources"])
+    research["source_list_only"] = source_list_only
+    research["include_all_sources"] = bool(
+        source_list_only or research.get("include_all_sources")
+    )
+    sources = research["sources"]
+    should_call_ai = (
+        not research["insufficient"]
+        and (not research["trend"] or research["analysis"])
+        and not source_list_only
+    )
+    if should_call_ai:
+        system = (
+            _research_chat_system(mode, sources, research)
+            + "\n\n" + _ai_language_instruction(uid)
+        )
+        if mode == "article_generation" and sources:
+            research["article_prefix"] = _research_article_header(sources)
+        _ai_call(ai._need_client, task)
     model_reply = (
         _ai_call(ai.chat, model_messages, system, task)
-        if chunks is None else ""
+        if should_call_ai else ""
     )
     response_text = "\n\n".join(
         part for part in (
+            _source_list_intro(msgs[-1]["content"], sources)
+            if source_list_only else "",
             research.get("article_prefix", ""),
             research["prefix"],
             model_reply,
@@ -2213,38 +2640,73 @@ def ask(
     mode = _requested_chat_mode(body.mode, query)
     task = "article_generation" if mode == "article_generation" else "story_chat"
     task = ask_story.classify_task(query) if task == "story_chat" else task
-    deep_research = ask_story.requires_deep_research(task, query)
-    retrieval_query = f"{a.get('title', '')}\n{query}".strip()
-    related_articles = _retrieve(
-        retrieval_query,
-        exclude_id=body.article_id,
-        limit=source_count,
-    )
-    research_disclosure = None
-    if deep_research:
-        sources, research_disclosure = ask_story_research.research_sources(
-            a, query, related_articles, limit=source_count
+    source_list_only = _is_source_list_only_request(query)
+    deep_research = source_list_only or ask_story.requires_deep_research(task, query)
+
+    def prepare():
+        sources = (
+            _cached_ask_story_sources(a, query, source_count)
+            if source_list_only else None
         )
-    else:
-        sources = ask_story_research.related_sources(
-            a, query, related_articles, limit=source_count
+        research_disclosure = None
+        if sources is None:
+            if (
+                deep_research
+                and not source_list_only
+                and not news._cache.get("stored_loaded")
+            ):
+                news.ensure_stored_cache_loaded()
+            retrieval_query = f"{a.get('title', '')}\n{query}".strip()
+            if source_list_only:
+                related_articles = [
+                    source for source in _rank_source_list(
+                        retrieval_query,
+                        list(news._cache["items"]),
+                        max(source_count * 3, 20),
+                    )
+                    if str(source.get("id")) != body.article_id
+                ]
+            else:
+                related_articles = _retrieve(
+                    retrieval_query,
+                    exclude_id=body.article_id,
+                    limit=source_count,
+                )
+            if deep_research:
+                sources, research_disclosure = ask_story_research.research_sources(
+                    a,
+                    query,
+                    related_articles,
+                    limit=source_count,
+                    fetch_article_text=not source_list_only,
+                )
+            else:
+                sources = ask_story_research.related_sources(
+                    a, query, related_articles, limit=source_count
+                )
+            if source_list_only:
+                _cache_ask_story_sources(a, query, source_count, sources)
+
+        if source_list_only:
+            return sources, ""
+        article_text_is_summary = not deep_research
+        article_context = (
+            a.get("summary") or ""
+            if article_text_is_summary
+            else news.article_text(a)
         )
-    article_text_is_summary = not deep_research
-    article_context = (
-        a.get("summary") or ""
-        if article_text_is_summary
-        else news.article_text(a)
-    )
-    system = ask_story.story_system(
-        a,
-        article_context,
-        sources,
-        research_disclosure=research_disclosure,
-        deep_research=deep_research,
-        source_count=source_count,
-        article_text_is_summary=article_text_is_summary,
-    )
-    system += "\n\n" + _ai_language_instruction(uid)
+        system = ask_story.story_system(
+            a,
+            article_context,
+            sources,
+            research_disclosure=research_disclosure,
+            deep_research=deep_research,
+            source_count=source_count,
+            article_text_is_summary=article_text_is_summary,
+        )
+        system += "\n\n" + _ai_language_instruction(uid)
+        return sources, system
+
     if stream:
         def event(data: dict) -> str:
             return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -2252,15 +2714,23 @@ def ask(
         def generate():
             response_parts = []
             try:
-                for chunk, _model in ask_story.generate_stream(
-                    msgs, system, task=task, article_id=body.article_id
-                ):
-                    response_parts.append(chunk)
-                    yield event({"type": "token", "text": chunk})
+                yield event({"type": "status", "text": "MIRA is analysing…"})
+                sources, system = prepare()
+                yield event({"type": "status", "text": "MIRA is typing…"})
+                if source_list_only:
+                    intro = _ask_story_source_intro(a, sources, source_count)
+                    response_parts.append(intro)
+                    yield event({"type": "token", "text": intro})
+                else:
+                    for chunk, _model in ask_story.generate_stream(
+                        msgs, system, task=task, article_id=body.article_id
+                    ):
+                        response_parts.append(chunk)
+                        yield event({"type": "token", "text": chunk})
                 reply = ask_story.append_sources(
                     "".join(response_parts),
                     sources,
-                    include_all_sources=deep_research,
+                    include_all_sources=source_list_only or deep_research,
                 )
                 conv = _save_story_turn(
                     uid, body.conversation_id, a, msgs[-1]["content"], reply
@@ -2279,14 +2749,18 @@ def ask(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    try:
-        reply, _model = ask_story.generate(
-            msgs, system, task=task, article_id=body.article_id
-        )
-    except ask_story.AskStoryFailure as exc:
-        raise HTTPException(503, str(exc)) from exc
+    sources, system = prepare()
+    if source_list_only:
+        reply = _ask_story_source_intro(a, sources, source_count)
+    else:
+        try:
+            reply, _model = ask_story.generate(
+                msgs, system, task=task, article_id=body.article_id
+            )
+        except ask_story.AskStoryFailure as exc:
+            raise HTTPException(503, str(exc)) from exc
     reply = ask_story.append_sources(
-        reply, sources, include_all_sources=deep_research
+        reply, sources, include_all_sources=source_list_only or deep_research
     )
     conv = _save_story_turn(
         uid, body.conversation_id, a, msgs[-1]["content"], reply

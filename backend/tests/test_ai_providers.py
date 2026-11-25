@@ -22,6 +22,13 @@ class ProviderTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
+    def test_external_provider_http_client_is_reused(self):
+        providers.close_http_client()
+        client = providers._get_http_client()
+        self.addCleanup(providers.close_http_client)
+
+        self.assertIs(providers._get_http_client(), client)
+
     def test_retired_gemini_model_maps_to_valid_flash_lite_id(self):
         with patch.dict(os.environ, {"GEMINI_MODEL": "gemini-2.5-flash"}):
             self.assertEqual(
@@ -80,6 +87,20 @@ class ProviderTests(unittest.TestCase):
         candidates = providers.models_for("general_chat", "Question")
 
         self.assertNotIn("text-model", [model.model for model in candidates])
+
+    def test_task_cooldown_does_not_hide_the_only_configured_model(self):
+        model = providers.ModelSpec(
+            "xai", "text-model", "key", "https://example.test/v1",
+            ("general_chat",), False, 0,
+        )
+        providers.record_health(
+            providers.task_cooldown_key(model, "general_chat"), healthy=False
+        )
+        with patch.object(providers, "configured_models", return_value=[model]):
+            self.assertEqual(
+                providers.models_for("general_chat", "Question"),
+                [model],
+            )
 
     def test_rate_limit_and_quota_are_fallback_errors_but_auth_is_not(self):
         self.assertEqual(providers._failure_from_response(429, "").category, "rate_limit")
@@ -153,6 +174,56 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual(result.text, "Fallback response")
         self.assertEqual(generate.call_count, 2)
+        failed_model = generate.call_args_list[0].args[0]
+        task_cooldown = providers.task_cooldown_key(failed_model, "general_chat")
+        self.assertTrue(providers.is_cooling_down(task_cooldown))
+        self.assertFalse(providers.is_cooling_down(failed_model.key))
+        self.assertIn(
+            failed_model,
+            providers.models_for("article_generation", "Question"),
+        )
+
+    def test_external_stream_continues_with_another_model_after_partial_failure(self):
+        first = providers.ModelSpec(
+            "xai", "broken-model", "key", "https://example.test/v1",
+            ("general_chat",), False, 0,
+        )
+        fallback = providers.ModelSpec(
+            "xai", "fallback-model", "key", "https://example.test/v1",
+            ("general_chat",), False, 1,
+        )
+        config = types.GenerateContentConfig(system_instruction="Be accurate.")
+        rejected = providers.ProviderFailure(
+            "invalid_request", "Provider rejected the request (HTTP 400).",
+            status_code=400,
+        )
+
+        def partial_response():
+            yield "The lead begins."
+            raise rejected
+
+        state = {"fallback_attempt": 0, "completed": False, "last_error": None}
+        with (
+            patch.object(providers, "is_cooling_down", return_value=False),
+            patch.object(providers, "sb", None),
+            patch.object(providers, "generate_stream", side_effect=[
+                partial_response(), iter([" The next detail."]),
+            ]) as generate_stream,
+        ):
+            result = list(ai._generate_external_stream(
+                [first, fallback],
+                contents="Explain inverted pyramid.",
+                config=config,
+                task="general_chat",
+                request_id="request-id",
+                state=state,
+            ))
+
+        self.assertEqual(result, ["The lead begins.", " The next detail."])
+        self.assertTrue(state["completed"])
+        fallback_contents = generate_stream.call_args_list[1].args[1]
+        self.assertIn("The lead begins.", fallback_contents[-2].parts[0].text)
+        self.assertIn("Continue the answer", fallback_contents[-1].parts[0].text)
 
     def test_gemini_image_rejection_tries_an_alternate_model(self):
         rejected = ai.errors.APIError.__new__(ai.errors.APIError)
